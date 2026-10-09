@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.python-version.local
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+coverage.xml
+.env
+.env.*
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.DS_Store
+
+# Raw study exports are large and must remain outside version control.
+data/**
+!data/data_dictionary.md
+
+# Generated pipeline products and local reports.
+output/*
+!output/.gitkeep
