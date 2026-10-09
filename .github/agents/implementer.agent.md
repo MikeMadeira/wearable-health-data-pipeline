@@ -15,9 +15,11 @@ Apply `.github/skills/agent-communication/SKILL.md` for the handoff to the orche
    - Keep raw inputs immutable; isolate file I/O from transformation logic where practical.
    - Preserve the documented grain, key, timezone, and idempotency contract.
    - Python 3.10+ typing where it improves the public contract.
+   - For `environment` increments, change only approved setup files and source code; retain the smoke test and verify both local pytest and the Docker image/test command.
+   - For `notebook` increments, change only `notebooks/` artifacts and the implementation report. Do not create specs, tests, or pipeline code. Notebook files must be valid `.ipynb` JSON; each cell has `metadata.language` (`markdown` or `python`), preserve IDs on existing cells, and use a Python kernel.
    - Do not weaken or delete existing tests in `tests/`.
 4. **Self-Verification Loop**:
-   - Run `pytest -q`.
+   - Run the verification gate for the selected increment kind: pytest for code/environment, Docker build and container tests for environment, and valid/executable changed notebooks plus raw-data immutability for notebook increments.
    - If any test fails, analyze the failure traceback and fix the implementation in `src/`.
    - Iterate until all tests are green.
 5. **Report**: Summarize the changes made in `src/` and output the final test results.

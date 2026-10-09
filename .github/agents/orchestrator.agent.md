@@ -13,6 +13,8 @@ runner owns subprocess execution and commits after validated gates. Apply the
 ## Inputs
 
 - One human-authored intent file under `intents/INC-xxx-*.md`.
+- The increment kind (`code`, `environment`, or `notebook`) and its corresponding
+  verification gate.
 - The current Git status and repository history.
 - Reports already present under `reports/<increment-id>/`, when resuming a phase.
 
@@ -25,6 +27,19 @@ For a broad initiative, delegate first to `slicing-planner`, then to
 produce the proposal commit. Slicing stops before specs, tests, stubs, or source code.
 
 ## Workflow
+
+### Increment kinds
+
+- `code` uses the standard spec, stub, red-test, implementation, and green-test gates.
+- `environment` uses a missing-dependency red smoke test (`test_environment_smoke`),
+  then verifies
+  local pytest plus Docker build and container tests. The implementation may change
+  the Dockerfile and dependency configuration.
+- `notebook` has a reviewed acceptance checklist but no spec/stub/test red baseline.
+  Implementation is limited to notebooks and reports; validate and execute changed
+  notebooks and confirm raw `data/` files remain unchanged.
+- Never force a deliverable into the code-stub workflow when its intent explicitly
+  excludes specs, tests, or Python pipeline code.
 
 ### Phase 1: Plan
 

@@ -36,3 +36,19 @@ When deriving a specification from an intent file (`intents/INC-xxx.md`):
   ```python
   raise NotImplementedError
   ```
+
+## 4. Non-code Increment Gates
+
+- **Environment increments** have no function stub unless the intent requires one.
+  Their red baseline is valid only when `test_environment_smoke` is the single
+  failure and it fails because the declared dependency is missing. After
+  implementation, run local pytest and
+  the Docker build/test gate.
+- **Notebook increments** do not create specs, tests, stubs, or pipeline code when
+  the intent excludes them. Planning produces an acceptance checklist and report;
+  implementation is verified by validating notebook JSON/cell metadata, executing
+  changed notebooks with their declared kernel, and confirming raw `data/` files are
+  unchanged.
+- Notebook cells must declare `metadata.language` as `markdown` or `python` for the
+  corresponding cell type. Preserve IDs on existing cells; newly added cells may omit
+  `metadata.id`.

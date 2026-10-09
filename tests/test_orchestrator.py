@@ -1,15 +1,20 @@
+import json
 from pathlib import Path
 
 import pytest
 
 from scripts.orchestrate_increment import (
     WorkflowError,
+    build_parser,
     parse_blocker_type,
     parse_report_status,
     require_retry_available,
     responsible_agent,
     resolve_artifact_id,
+    run_notebooks,
     should_resume_implementation,
+    run_tests,
+    validate_notebook_document,
     validate_repair_paths,
     validate_phase_paths,
 )
@@ -175,3 +180,244 @@ def test_validate_phase_paths_rejects_source_changes_during_slicing() -> None:
             "slicing",
             "INIT-001-customer-data-quality",
         )
+
+
+def test_environment_increment_allows_setup_files_and_smoke_test_planning() -> None:
+    validate_phase_paths(
+        ["specs/INC-000-environment.md", "tests/test_environment_smoke.py"],
+        "planning",
+        "INC-000-environment-setup",
+        "environment",
+    )
+    validate_phase_paths(
+        [
+            "Dockerfile",
+            "pyproject.toml",
+            "uv.lock",
+            "reports/INC-000-environment-setup/implementation.md",
+        ],
+        "implementation",
+        "INC-000-environment-setup",
+        "environment",
+    )
+    with pytest.raises(WorkflowError, match="planning path"):
+        validate_phase_paths(
+            ["tests/test_environment_smoke.py"],
+            "implementation",
+            "INC-000-environment-setup",
+            "environment",
+        )
+    with pytest.raises(WorkflowError, match="another work item's report"):
+        validate_phase_paths(
+            ["reports/INC-002-other/implementation.md"],
+            "implementation",
+            "INC-000-environment-setup",
+            "environment",
+        )
+
+
+def test_notebook_increment_limits_planning_and_implementation_paths() -> None:
+    validate_phase_paths(
+        ["reports/INC-001-participants-profiling/planner.md"],
+        "planning",
+        "INC-001-participants-profiling",
+        "notebook",
+    )
+    validate_phase_paths(
+        [
+            "notebooks/profiling/participants.ipynb",
+            "reports/INC-001-participants-profiling/implementation.md",
+        ],
+        "implementation",
+        "INC-001-participants-profiling",
+        "notebook",
+    )
+    with pytest.raises(WorkflowError, match="planning path"):
+        validate_phase_paths(
+            ["tests/test_participants.py"],
+            "implementation",
+            "INC-001-participants-profiling",
+            "notebook",
+        )
+
+
+def test_environment_red_gate_accepts_only_missing_dependency_smoke_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from scripts import orchestrate_increment
+
+    monkeypatch.setattr(
+        orchestrate_increment,
+        "run_command",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=["pytest"],
+            returncode=1,
+            stdout=(
+                "tests/test_environment_smoke.py::test_environment_smoke FAILED\n"
+                "=========================== 1 failed, 23 passed ===========================\n"
+            ),
+            stderr="ModuleNotFoundError: No module named 'duckdb'",
+        ),
+    )
+    assert "No module named 'duckdb'" in run_tests(tmp_path, "python", "environment-red")
+
+
+def test_environment_red_gate_rejects_unrelated_pytest_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from scripts import orchestrate_increment
+
+    monkeypatch.setattr(
+        orchestrate_increment,
+        "run_command",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=["pytest"],
+            returncode=1,
+            stdout="2 failed, 22 passed",
+            stderr="No module named 'duckdb'",
+        ),
+    )
+    with pytest.raises(WorkflowError, match="only test_environment_smoke"):
+        run_tests(tmp_path, "python", "environment-red")
+
+
+def test_notebook_document_requires_cell_language_and_unique_ids() -> None:
+    notebook = {
+        "cells": [
+            {"cell_type": "markdown", "metadata": {"language": "markdown"}, "source": "# Profile"},
+            {"cell_type": "code", "metadata": {"language": "python", "id": "cell-a"}, "source": ["1 + 1\n"]},
+        ]
+    }
+    assert len(validate_notebook_document(notebook, "sample.ipynb")) == 2
+
+    notebook["cells"][1]["metadata"]["language"] = "markdown"
+    with pytest.raises(WorkflowError, match="metadata.language"):
+        validate_notebook_document(notebook, "sample.ipynb")
+
+
+def test_notebook_document_rejects_duplicate_cell_ids() -> None:
+    notebook = {
+        "cells": [
+            {"cell_type": "markdown", "metadata": {"language": "markdown", "id": "same"}, "source": "one"},
+            {"cell_type": "code", "metadata": {"language": "python", "id": "same"}, "source": "pass"},
+        ]
+    }
+    with pytest.raises(WorkflowError, match="duplicate metadata.id"):
+        validate_notebook_document(notebook, "sample.ipynb")
+
+
+def test_repair_paths_follow_increment_kind() -> None:
+    validate_repair_paths(
+        ["Dockerfile", "reports/INC-000-environment-setup/implementation-recovery-01.md"],
+        "IMPLEMENTATION",
+        "INC-000-environment-setup",
+        "implementation",
+        "environment",
+    )
+    validate_repair_paths(
+        ["notebooks/profiling/participants.ipynb", "reports/INC-001-participants-profiling/implementation-recovery-01.md"],
+        "IMPLEMENTATION",
+        "INC-001-participants-profiling",
+        "implementation",
+        "notebook",
+    )
+
+
+@pytest.mark.parametrize("kind", ["code", "environment", "notebook"])
+def test_parser_accepts_increment_kind(kind: str) -> None:
+    args = build_parser().parse_args(
+        ["--kind", kind, "--increment", "INC-001", "--intent", "intents/INC-001-test.md"]
+    )
+    assert args.kind == kind
+
+
+def test_run_notebooks_executes_python_cells_and_preserves_raw_data(
+    tmp_path: Path,
+) -> None:
+    notebook_path = tmp_path / "notebooks" / "profiling" / "participants.ipynb"
+    notebook_path.parent.mkdir(parents=True)
+    notebook_path.write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "cell_type": "markdown",
+                        "metadata": {"language": "markdown"},
+                        "source": "# Smoke test",
+                    },
+                    {
+                        "cell_type": "code",
+                        "execution_count": None,
+                        "metadata": {"language": "python"},
+                        "outputs": [],
+                        "source": ["assert 1 + 1 == 2\n"],
+                    },
+                ],
+                "metadata": {
+                    "kernelspec": {
+                        "display_name": "Python (wearable-health-data-pipeline)",
+                        "language": "python",
+                        "name": "wearable-health-data-pipeline",
+                    }
+                },
+                "nbformat": 4,
+                "nbformat_minor": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    raw_data = tmp_path / "data" / "source.csv"
+    raw_data.parent.mkdir()
+    raw_data.write_text("id\n1\n", encoding="utf-8")
+    original_notebook = notebook_path.read_text(encoding="utf-8")
+
+    checks = run_notebooks(tmp_path, ["notebooks/profiling/participants.ipynb"])
+
+    assert checks == [
+        "notebooks/profiling/participants.ipynb: JSON and Python cells executed; data/ unchanged"
+    ]
+    assert raw_data.read_text(encoding="utf-8") == "id\n1\n"
+    assert notebook_path.read_text(encoding="utf-8") == original_notebook
+
+
+def test_run_notebooks_rejects_raw_data_mutation(tmp_path: Path) -> None:
+    notebook_path = tmp_path / "notebooks" / "profiling" / "mutating.ipynb"
+    notebook_path.parent.mkdir(parents=True)
+    notebook_path.write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "execution_count": None,
+                        "metadata": {"language": "python"},
+                        "outputs": [],
+                        "source": [
+                            "from pathlib import Path\n",
+                            "Path('data/source.csv').write_text('changed')\n",
+                        ],
+                    }
+                ],
+                "metadata": {
+                    "kernelspec": {
+                        "display_name": "Python (wearable-health-data-pipeline)",
+                        "language": "python",
+                        "name": "wearable-health-data-pipeline",
+                    }
+                },
+                "nbformat": 4,
+                "nbformat_minor": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    raw_data = tmp_path / "data" / "source.csv"
+    raw_data.parent.mkdir()
+    raw_data.write_text("original", encoding="utf-8")
+
+    with pytest.raises(WorkflowError, match="modified files under data/"):
+        run_notebooks(tmp_path, ["notebooks/profiling/mutating.ipynb"])

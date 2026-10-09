@@ -11,6 +11,9 @@ COPY src ./src
 COPY tests ./tests
 COPY scripts ./scripts
 RUN python -m pip install '.[dev]'
+RUN python -m ipykernel install --sys-prefix \
+    --name wearable-health-data-pipeline \
+    --display-name "Python (wearable-health-data-pipeline)"
 
 COPY . .
 

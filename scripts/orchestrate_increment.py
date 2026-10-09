@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
+from uuid import uuid4
 from pathlib import Path
 
 
@@ -95,30 +97,53 @@ def should_resume_implementation(status_output: str, implementation_report: str)
     return implementation_report in changed_paths(status_output)
 
 
-def validate_phase_paths(paths: list[str], phase: str, work_item: str) -> None:
+def validate_phase_paths(
+    paths: list[str], phase: str, work_item: str, kind: str = "code"
+) -> None:
     """Reject edits outside the paths owned by the current phase."""
     report_prefix = f"reports/{work_item}/"
-    allowed_prefixes = (
-        ("reports/", "plans/")
-        if phase == "slicing"
-        else ("reports/", "specs/", "tests/", "src/")
-    )
+    if kind not in {"code", "environment", "notebook"}:
+        raise WorkflowError(f"Unknown increment kind: {kind}")
+    if phase == "slicing":
+        allowed_prefixes = ("reports/", "plans/")
+    elif phase == "planning":
+        allowed_prefixes = ("reports/",) if kind == "notebook" else (
+            "reports/", "specs/", "tests/", "src/"
+        )
+    elif phase == "implementation" and kind == "notebook":
+        allowed_prefixes = ("reports/", "notebooks/")
+    elif phase == "implementation":
+        allowed_prefixes = ("reports/", "src/")
+    else:
+        raise WorkflowError(f"Unknown workflow phase: {phase}")
 
     for path in paths:
         if path.startswith("intents/"):
             raise WorkflowError(f"Phase attempted to modify a human intent: {path}")
-        if phase == "planning" and path == "pyproject.toml":
+        if phase == "implementation" and path.startswith(("specs/", "tests/")):
+            raise WorkflowError(f"Implementation modified a planning path: {path}")
+        if phase == "planning" and kind != "notebook" and path in {
+            "pyproject.toml", "uv.lock"
+        }:
+            continue
+        if phase == "implementation" and kind == "environment" and path in {
+            "Dockerfile",
+            "pyproject.toml",
+            "uv.lock",
+        }:
             continue
         if not path.startswith(allowed_prefixes):
             raise WorkflowError(f"Phase modified an unauthorized path: {path}")
-        if phase == "implementation" and not (
-            path.startswith("src/") or path.startswith(report_prefix)
-        ):
-            raise WorkflowError(f"Implementation modified a planning path: {path}")
         if phase == "planning" and path.startswith("reports/") and not path.startswith(
             report_prefix
         ):
             raise WorkflowError(f"Planning modified another work item's report: {path}")
+        if phase == "implementation" and path.startswith("reports/") and not path.startswith(
+            report_prefix
+        ):
+            raise WorkflowError(
+                f"Implementation modified another work item's report: {path}"
+            )
         if phase == "slicing" and not (
             path.startswith("plans/") or path.startswith(report_prefix)
         ):
@@ -195,9 +220,145 @@ def run_tests(repo_root: Path, python_executable: str, expected: str) -> str:
             raise WorkflowError(
                 "Planning test gate was not a genuine NotImplementedError red baseline"
             )
+    elif expected == "environment-red":
+        expected_prerequisite_errors = ("ModuleNotFoundError", "No module named")
+        exactly_one_smoke_failure = bool(
+            re.search(r"(?m)^=+\s+1 failed(?:,|\s)", output)
+        ) and "test_environment_smoke" in output
+        if result.returncode == 0 or not exactly_one_smoke_failure or not any(
+            message in output for message in expected_prerequisite_errors
+        ):
+            raise WorkflowError(
+                "Planning test gate requires only test_environment_smoke to fail because a declared dependency is unavailable"
+            )
     elif result.returncode != 0:
         raise WorkflowError("Implementation test gate failed")
     return output
+
+
+def _data_snapshot(repo_root: Path) -> dict[str, str]:
+    """Hash raw input files so notebook runs cannot silently modify them."""
+    data_root = repo_root / "data"
+    snapshot: dict[str, str] = {}
+    if not data_root.exists():
+        return snapshot
+    for path in sorted(data_root.rglob("*")):
+        if path.is_file():
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            snapshot[str(path.relative_to(data_root))] = digest.hexdigest()
+    return snapshot
+
+
+def validate_notebook_document(
+    notebook: object, relative_path: str
+) -> list[dict[str, object]]:
+    """Validate the required cell metadata and source shapes without execution."""
+    cells = notebook.get("cells") if isinstance(notebook, dict) else None
+    if not isinstance(cells, list):
+        raise WorkflowError(f"{relative_path} must contain a cells array")
+
+    seen_ids: set[str] = set()
+    for cell_number, cell in enumerate(cells, start=1):
+        if not isinstance(cell, dict):
+            raise WorkflowError(f"{relative_path} cell {cell_number} must be a JSON object")
+        cell_type = cell.get("cell_type")
+        metadata = cell.get("metadata")
+        if not isinstance(metadata, dict):
+            raise WorkflowError(f"{relative_path} cell {cell_number} must have metadata")
+        expected_language = {"markdown": "markdown", "code": "python"}.get(
+            str(cell_type)
+        )
+        if expected_language is None or metadata.get("language") != expected_language:
+            raise WorkflowError(
+                f"{relative_path} cell {cell_number} must declare metadata.language={expected_language!r}"
+            )
+        cell_id = metadata.get("id")
+        if cell_id is not None:
+            if not isinstance(cell_id, str) or not cell_id or cell_id in seen_ids:
+                raise WorkflowError(
+                    f"{relative_path} cell {cell_number} has an invalid or duplicate metadata.id"
+                )
+            seen_ids.add(cell_id)
+        source = cell.get("source")
+        if not isinstance(source, str) and not (
+            isinstance(source, list) and all(isinstance(line, str) for line in source)
+        ):
+            raise WorkflowError(
+                f"{relative_path} cell {cell_number} has an invalid source value"
+            )
+    return cells
+
+
+def run_notebooks(repo_root: Path, relative_paths: list[str]) -> list[str]:
+    """Validate and execute changed Python notebooks without storing outputs."""
+    notebook_paths = sorted(path for path in relative_paths if path.endswith(".ipynb"))
+    if not notebook_paths:
+        raise WorkflowError("Notebook increment did not produce a changed .ipynb file")
+
+    try:
+        import nbformat
+        from nbclient import NotebookClient
+    except ImportError as error:
+        raise WorkflowError(
+            "Notebook validation requires the development dependencies nbformat and nbclient"
+        ) from error
+
+    before = _data_snapshot(repo_root)
+    try:
+        for relative_path in notebook_paths:
+            path = repo_root / relative_path
+            try:
+                notebook = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise WorkflowError(f"Invalid notebook JSON in {relative_path}: {error}") from error
+            validate_notebook_document(notebook, relative_path)
+
+            try:
+                for cell in notebook["cells"]:
+                    if not cell.get("id"):
+                        cell["id"] = uuid4().hex[:8]
+                notebook_node = nbformat.from_dict(notebook)
+                for cell in notebook_node.cells:
+                    if not cell.metadata.get("id"):
+                        cell.metadata["id"] = uuid4().hex[:8]
+                    if isinstance(cell.source, list):
+                        cell.source = "".join(cell.source)
+                nbformat.validate(notebook_node)
+                kernel_name = notebook_node.metadata.get("kernelspec", {}).get(
+                    "name", "python3"
+                )
+                NotebookClient(
+                    notebook_node,
+                    timeout=600,
+                    kernel_name=kernel_name,
+                    resources={"metadata": {"path": str(repo_root)}},
+                ).execute()
+            except Exception as error:
+                raise WorkflowError(
+                    f"Notebook execution failed for {relative_path}: {error}"
+                ) from error
+    finally:
+        after = _data_snapshot(repo_root)
+        if before != after:
+            raise WorkflowError("Notebook execution modified files under data/")
+
+    return [f"{path}: JSON and Python cells executed; data/ unchanged" for path in notebook_paths]
+
+
+def run_docker_tests(repo_root: Path, docker_command: str, work_item: str) -> None:
+    """Build the project image and run its test suite inside the container."""
+    image = f"wearable-pipeline-{work_item.lower().replace('_', '-')}-test"
+    require_success(
+        run_command([docker_command, "build", "--tag", image, "."], repo_root),
+        "Docker image build",
+    )
+    require_success(
+        run_command([docker_command, "run", "--rm", image, "python", "-m", "pytest", "-q"], repo_root),
+        "Container test suite",
+    )
 
 
 def invoke_agent(
@@ -253,11 +414,17 @@ def validate_repair_paths(
     blocker_type: str,
     artifact_id: str,
     phase: str,
+    kind: str = "code",
 ) -> None:
     """Constrain a repair agent to artifacts owned by its blocker category."""
     report_prefix = f"reports/{artifact_id}/{phase}-recovery-"
+    implementation_paths = {
+        "code": ("src/",),
+        "environment": ("src/",),
+        "notebook": ("notebooks/",),
+    }
     allowed = {
-        "IMPLEMENTATION": ("src/",),
+        "IMPLEMENTATION": implementation_paths.get(kind, ()),
         "TESTS": ("tests/",),
         "SPECIFICATION": ("specs/", "tests/"),
         "SLICING": ("plans/",),
@@ -265,7 +432,16 @@ def validate_repair_paths(
     if allowed is None:
         responsible_agent(blocker_type)
     for path in paths:
-        if not path.startswith(allowed) and not path.startswith(report_prefix):
+        environment_file = kind == "environment" and path in {
+            "Dockerfile",
+            "pyproject.toml",
+            "uv.lock",
+        }
+        if (
+            not path.startswith(allowed)
+            and not path.startswith(report_prefix)
+            and not environment_file
+        ):
             raise WorkflowError(
                 f"{blocker_type} repair modified an unauthorized path: {path}"
             )
@@ -279,6 +455,7 @@ def repair_blocker(
     source_report: str,
     phase: str,
     attempt: int,
+    kind: str = "code",
 ) -> tuple[str, str]:
     """Route one classified blocker, review the repair, and commit plan fixes."""
     agent = responsible_agent(blocker_type)
@@ -301,7 +478,7 @@ def repair_blocker(
     )
     require_report(repo_root, recovery_report, "READY")
     repair_paths = changed_since_snapshot(repo_root, before)
-    validate_repair_paths(repair_paths, blocker_type, artifact_id, phase)
+    validate_repair_paths(repair_paths, blocker_type, artifact_id, phase, kind)
     if recovery_report not in repair_paths:
         raise WorkflowError(f"Repair agent did not create {recovery_report}")
 
@@ -317,7 +494,7 @@ def repair_blocker(
     )
     require_report(repo_root, recovery_review, "APPROVED")
     review_paths = changed_since_snapshot(repo_root, before_review)
-    validate_repair_paths(review_paths, blocker_type, artifact_id, phase)
+    validate_repair_paths(review_paths, blocker_type, artifact_id, phase, kind)
 
     if blocker_type in {"TESTS", "SPECIFICATION"}:
         all_repair_paths = sorted(set(repair_paths + review_paths))
@@ -378,8 +555,9 @@ def commit_phase(
     phase: str,
     work_item: str,
     message: str,
+    kind: str = "code",
 ) -> None:
-    validate_phase_paths(paths, phase, work_item)
+    validate_phase_paths(paths, phase, work_item, kind)
     unique_paths = sorted(set(paths))
     require_success(git(repo_root, "add", "--", *unique_paths), "Git staging")
     staged = git(repo_root, "diff", "--cached", "--name-only").stdout.splitlines()
@@ -527,10 +705,26 @@ def run_implementation_phase(
     implementation_retries = 0
     recovery_report: str | None = None
     while True:
-        implementation_prompt = (
-            f"Execute or resume the implementation phase for {work_item} against the generated spec and tests. "
-            f"Read any existing {implementation_report}, write its updated result, and do not modify specs or tests."
-        )
+        if args.kind == "environment":
+            implementation_prompt = (
+                f"Implement the environment/setup increment {work_item} from its intent and reviewed plan. "
+                f"Read any existing {implementation_report}; modify only the approved environment files, "
+                "preserve the environment smoke test, and verify local tests plus Docker build/test."
+            )
+        elif args.kind == "notebook":
+            implementation_prompt = (
+                f"Implement the notebook increment {work_item} from its intent and reviewed plan. "
+                f"Read any existing {implementation_report}; create or modify only the required notebooks/ "
+                "artifacts and the phase report. Do not create specs, tests, or pipeline source code. "
+                "Each notebook must be valid .ipynb JSON, every cell must set metadata.language to "
+                "markdown or python as appropriate, preserve metadata.id on existing cells, and be "
+                "runnable with a Python 3 kernel."
+            )
+        else:
+            implementation_prompt = (
+                f"Execute or resume the implementation phase for {work_item} against the generated spec and tests. "
+                f"Read any existing {implementation_report}, write its updated result, and do not modify specs or tests."
+            )
         if recovery_report:
             implementation_prompt += (
                 f" Resume using the approved correction in {recovery_report}."
@@ -570,7 +764,9 @@ def run_implementation_phase(
             repo_root,
             args.copilot,
             "reviewer",
-            f"Review the implementation phase for {work_item}. Read the spec, tests, implementation, and {implementation_report}. Write {implementation_review} and use the communication protocol.",
+            f"Review the {args.kind} implementation phase for {work_item}. Read its intent, relevant artifacts, "
+            f"and {implementation_report}. Verify only the files allowed for this increment kind and write "
+            f"{implementation_review} using the communication protocol.",
         )
         implementation_review_status = parse_report_status(
             repo_root / implementation_review
@@ -593,9 +789,22 @@ def run_implementation_phase(
             implementation_review,
             "implementation",
             implementation_retries,
+                args.kind,
         )
 
-    run_tests(repo_root, args.python, "green")
+    if args.kind == "notebook":
+        verification_checks = run_notebooks(
+            repo_root,
+            changed_paths(
+                git(repo_root, "status", "--porcelain", "--untracked-files=all").stdout
+            ),
+        )
+    else:
+        run_tests(repo_root, args.python, "green")
+        verification_checks = ["pytest green baseline: PASS"]
+        if args.kind == "environment":
+            run_docker_tests(repo_root, args.docker, work_item)
+            verification_checks.append("Docker image build and container tests: PASS")
 
     implementation_paths = changed_paths(
         git(repo_root, "status", "--porcelain", "--untracked-files=all").stdout
@@ -606,7 +815,11 @@ def run_implementation_phase(
         "orchestrator-execution.md",
         "APPROVED",
         "Implementation gate passed; review the commit and reports.",
-        ["implementation.md: READY", "implementation-review.md: APPROVED", "pytest green baseline: PASS"],
+        [
+            "implementation.md: READY",
+            "implementation-review.md: APPROVED",
+            *verification_checks,
+        ],
     )
     if execution_report not in implementation_paths:
         implementation_paths.append(execution_report)
@@ -616,6 +829,7 @@ def run_implementation_phase(
         "implementation",
         artifact_id,
         f"feat({work_item}): implement increment against spec",
+        args.kind,
     )
     if git(repo_root, "status", "--porcelain", "--untracked-files=all").stdout:
         raise WorkflowError("Working tree is not clean after the final commit")
@@ -653,7 +867,7 @@ def run_increment_workflow(args: argparse.Namespace) -> None:
         print(f"Resuming implementation phase from {implementation_report}")
     elif resume_planning:
         pending_paths = changed_paths(status_output)
-        validate_phase_paths(pending_paths, "planning", artifact_id)
+        validate_phase_paths(pending_paths, "planning", artifact_id, args.kind)
         planner_path = repo_root / "reports" / artifact_id / "planner.md"
         if not planner_path.is_file():
             raise WorkflowError(
@@ -679,11 +893,29 @@ def run_increment_workflow(args: argparse.Namespace) -> None:
 
     planning_retries = 0
     if not resume_planning:
+        if args.kind == "environment":
+            planning_prompt = (
+                f"Plan the environment/setup increment in {args.intent}. Define a focused contract and "
+                "a smoke test named test_environment_smoke that fails specifically because a declared "
+                f"dependency is missing. Create the spec, test, and {planner_report}; do not create a function stub or "
+                "implement the environment changes."
+            )
+        elif args.kind == "notebook":
+            planning_prompt = (
+                f"Review the approved notebook slice in {args.intent}. Create only {planner_report} with "
+                "the concrete notebook acceptance checklist and verification approach. Do not create a "
+                "spec, tests, stubs, notebooks, or source code; this increment has no red-test baseline."
+            )
+        else:
+            planning_prompt = (
+                f"Execute the planning phase for {args.intent}. Create the spec, red tests, stub, and "
+                f"{planner_report}. Do not implement production logic."
+            )
         invoke_agent(
             repo_root,
             args.copilot,
             "planner",
-            f"Execute the planning phase for {args.intent}. Create the spec, red tests, stub, and {planner_report}. Do not implement production logic.",
+            planning_prompt,
         )
     while True:
         if not (repo_root / planner_report).is_file():
@@ -711,6 +943,7 @@ def run_increment_workflow(args: argparse.Namespace) -> None:
             planner_report,
             "planning",
             planning_retries,
+                args.kind,
         )
         invoke_agent(
             repo_root,
@@ -723,11 +956,22 @@ def run_increment_workflow(args: argparse.Namespace) -> None:
     needs_planning_review = True
     while True:
         if needs_planning_review:
+            if args.kind == "notebook":
+                planning_review_prompt = (
+                    f"Review the planning checklist for notebook increment {work_item}. Read {args.intent} "
+                    f"and {planner_report}; no spec, tests, or stub should exist. Write {planning_review} "
+                    "using the communication protocol."
+                )
+            else:
+                planning_review_prompt = (
+                    f"Review the planning phase for {work_item}. Read the intent, spec, tests, and "
+                    f"{planner_report}. Write {planning_review} and use the communication protocol."
+                )
             invoke_agent(
                 repo_root,
                 args.copilot,
                 "reviewer",
-                f"Review the planning phase for {work_item}. Read the intent, spec, tests, and {planner_report}. Write {planning_review} and use the communication protocol.",
+                planning_review_prompt,
             )
         review_status = parse_report_status(repo_root / planning_review)
         if review_status == "APPROVED":
@@ -755,7 +999,26 @@ def run_increment_workflow(args: argparse.Namespace) -> None:
         )
         require_report(repo_root, recovery_report, "READY")
         needs_planning_review = True
-    run_tests(repo_root, args.python, "red")
+    if args.kind == "notebook":
+        planning_checks = [
+            "planner.md: READY",
+            "planning-review.md: APPROVED",
+            "Notebook acceptance checklist reviewed; no red-test baseline applies",
+        ]
+    elif args.kind == "environment":
+        run_tests(repo_root, args.python, "environment-red")
+        planning_checks = [
+            "planner.md: READY",
+            "planning-review.md: APPROVED",
+            "Environment prerequisite red baseline: PASS",
+        ]
+    else:
+        run_tests(repo_root, args.python, "red")
+        planning_checks = [
+            "planner.md: READY",
+            "planning-review.md: APPROVED",
+            "pytest red baseline: PASS",
+        ]
 
     planning_paths = changed_paths(
         git(repo_root, "status", "--porcelain", "--untracked-files=all").stdout
@@ -766,7 +1029,7 @@ def run_increment_workflow(args: argparse.Namespace) -> None:
         "orchestrator-planning.md",
         "APPROVED",
         "Planning gate passed; the planning commit was created and implementation may begin.",
-        ["planner.md: READY", "planning-review.md: APPROVED", "pytest red baseline: PASS"],
+        planning_checks,
     )
     if plan_report not in planning_paths:
         planning_paths.append(plan_report)
@@ -776,6 +1039,7 @@ def run_increment_workflow(args: argparse.Namespace) -> None:
         "planning",
         artifact_id,
         f"spec({work_item}): add generated spec and red test baseline",
+        args.kind,
     )
 
     run_implementation_phase(
@@ -797,6 +1061,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run an implementation increment or propose vertical slices",
     )
     parser.add_argument(
+        "--kind",
+        choices=("code", "environment", "notebook"),
+        default="code",
+        help="Increment artifact and verification type",
+    )
+    parser.add_argument(
         "--increment",
         required=True,
         help="Work item ID, for example INC-005 or INIT-001",
@@ -805,6 +1075,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", default=".", help="Repository root (default: current directory)")
     parser.add_argument("--copilot", default="copilot", help="Copilot CLI executable")
     parser.add_argument("--python", default=sys.executable, help="Python executable used to run pytest")
+    parser.add_argument("--docker", default="docker", help="Docker executable for environment increments")
     parser.add_argument(
         "--max-retries",
         type=int,

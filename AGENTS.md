@@ -24,6 +24,8 @@ The raw study data is in `data/` locally and must remain immutable and out of Gi
 
 - `scripts/orchestrate_increment.py` coordinates planner, planning reviewer,
   implementer, and implementation reviewer phases.
+- Pass `--kind code`, `--kind environment`, or `--kind notebook` to select the
+  matching planning, ownership, and verification gates. The default is `code`.
 - Agents communicate through `reports/<artifact-id>/` Markdown artifacts and follow
   `.github/skills/agent-communication/SKILL.md`.
 - Human-authored intents under `intents/` are the source of scope. The intent

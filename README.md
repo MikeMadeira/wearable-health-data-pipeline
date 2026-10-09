@@ -34,6 +34,9 @@ pyenv virtualenv 3.12.6 wearable-health-data-pipeline-3.12.6
 pyenv activate wearable-health-data-pipeline-3.12.6
 uv sync --active --python 3.12.6 --locked --extra dev
 uv run --active --python 3.12.6 --locked python -m pytest -q
+uv run --active --python 3.12.6 --locked python -m ipykernel install --user \
+  --name wearable-health-data-pipeline \
+  --display-name "Python (wearable-health-data-pipeline)"
 ```
 
 If Python 3.12.6 or the named virtualenv is already installed, skip its creation
@@ -64,15 +67,25 @@ Review every generated report and commit before continuing.
 python scripts/orchestrate_increment.py \
   --mode slice \
   --increment INIT-001 \
-  --intent intents/INIT-001-wearable-health-pipeline.md
+  --intent intents/INIT-001-<slug>.md
 ```
 
-For an approved slice:
+Run a shared environment setup increment before any slice that needs new tooling:
 
 ```bash
 python scripts/orchestrate_increment.py \
+  --kind environment \
+  --increment INC-000 \
+  --intent intents/INC-000-<slug>.md
+```
+
+For an approved notebook slice:
+
+```bash
+python scripts/orchestrate_increment.py \
+  --kind notebook \
   --increment INC-001 \
-  --intent intents/INC-001-example-slice.md
+  --intent intents/INC-001-<slug>.md
 ```
 
 The runner uses the Copilot CLI by default. See `AGENTS.md` and the agent protocol
