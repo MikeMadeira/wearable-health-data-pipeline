@@ -24,13 +24,22 @@ kept at `data/data_dictionary.md`.
 
 ## Local setup
 
-Use Python 3.10 or newer. This workspace pins the existing Python 3.12.6 pyenv
-environment. Install the project and test dependency, then run the harness tests:
+Use pyenv with pyenv-virtualenv and install `uv`. The tracked `.python-version` selects
+the project environment, created from Python 3.12.6. On a new machine, create it once
+and install the exact dependencies from `uv.lock`:
 
 ```bash
-python -m pip install -e '.[dev]'
-python -m pytest -q
+pyenv install 3.12.6
+pyenv virtualenv 3.12.6 wearable-health-data-pipeline-3.12.6
+pyenv activate wearable-health-data-pipeline-3.12.6
+uv sync --active --python 3.12.6 --locked --extra dev
+uv run --active --python 3.12.6 --locked python -m pytest -q
 ```
+
+If Python 3.12.6 or the named virtualenv is already installed, skip its creation
+command. When changing dependencies, update `pyproject.toml`, run
+`uv lock --python 3.12.6`, and commit both files. `uv sync --active --python 3.12.6 --locked` then
+reproduces the locked environment in the currently activated pyenv virtualenv.
 
 The dataset is publicly readable from the challenge bucket if it needs to be fetched
 again:
