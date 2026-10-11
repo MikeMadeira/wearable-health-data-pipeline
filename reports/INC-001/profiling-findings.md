@@ -111,9 +111,10 @@ keys, all 28 study days present for every enrolled participant (`tab-04`, `tab-1
 | A-04 | The duplicated 2026-01-10 day and the missing 2026-01-08 day in P010, P019, P022, P025 are related (a mis-stamped day). | The values do not match exactly (conflicting values in 856 to 1,300 pairs), so equivalence is not shown (`shr-10`). |
 | A-05 | The 40-200 bpm and 0-30 steps/minute ranges from the dictionary are the right validity thresholds. | Dictionary-provided; the 0-30 steps bound is flagged as an "expected" rate with bursts allowed. |
 
-## 6. G1 decision list (all items are UNRESOLVED until the human records a decision)
+## 6. Decision Options from Profiling (Superseded)
 
-For each item: options, evidence, and the proposal of this increment. Status of every item: **unresolved**.
+The following entries preserve the options and evidence considered during profiling. Their former unresolved statuses are
+superseded by the human decisions in Section 7; unselected options remain context only.
 
 1. **Quality policy** (UNRESOLVED). Options: (a) fail the run on any defect; (b) quarantine defective records into a
    side table and keep the rest; (c) flag-and-keep every record with quality columns; (d) exclude whole affected
@@ -154,5 +155,71 @@ For each item: options, evidence, and the proposal of this increment. Status of 
 10. **Further items to record** (UNRESOLVED): the handling of `_unit` records (M-01), whether `2.1.8` firmware is real (T-03), the
     definition of `sleep_end` (A-03), and the rule for choosing between conflicting duplicate records (M-07).
 
-Unresolved summary: all ten items above, including the five required for G1 (quality policy, timezone, day assignment,
-daily grain, walking-skeleton source), remain unresolved until the human records decisions.
+## 7. Human Decisions
+
+Selected by the human during profiling review on 2026-10-11. The G1 choices below are approved for the walking skeleton.
+G2/G3/G4 directions are selected but must be ratified at their named review gates before those slices are implemented. Keep
+all source records and raw values; handle defects at field/measure level so unrelated valid measurements remain usable.
+
+### G1: walking-skeleton decisions
+
+1. **Quality policy:** preserve each raw row in bronze. Normalize, flag, or make only the affected normalized field unavailable
+    so it cannot contaminate metrics. Preserve other valid fields from the same row/day; do not fail or exclude a whole day for a
+    field-level defect. Persist quality outcomes and provenance.
+2. **Timezone:** interpret naive wearable timestamps as local UTC-05:00 and convert explicit `Z` timestamps to that local
+    timeline before joins and local-date assignment. Record the offset in the data contract. This matches the observed grid fit
+    for the `Z` records (M-05, `shr-08`).
+3. **Day assignment:** use the sleep `date` wake-up field for sleep and normalized local calendar date for minute records
+    (`xs-06`, `xs-08`).
+4. **Daily grain:** `gold_clinical_daily` is keyed by (`participant_id`, `local_date`) and includes quality/completeness or
+    valid-count fields.
+5. **Walking skeleton:** start with `wellness_survey.csv`. Keep P999 in silver with an orphan flag; exclude it only from outputs
+    requiring an enrolled-participant join.
+
+### Field-level quality decisions
+
+- **Steps `_unit=steps_per_hour` (M-01):** preserve raw rows; flag and withhold the normalized per-minute step value and its
+   aggregate contribution until source semantics are confirmed. Do not assume division by 60.
+- **Step values (M-02):** negative values are invalid for normalized step metrics. Values above 30 are flagged as bursts, not
+   rejected. No positive upper cutoff is approved; decide only after semantic review. Apply after resolving `_unit`.
+- **Heart-rate range (M-03):** values outside inclusive 40-200 bpm are preserved raw, flagged, and excluded only from the
+   normalized HR field and HR aggregates.
+- **Stuck HR (M-04):** provisionally flag runs of at least 60 identical consecutive minutes. Preserve raw readings but exclude
+   flagged HR values from aggregates; revisit this provisional threshold with validated behavior or later data.
+- **Duplicate minute slots (M-07):** preserve all raw rows. For conflicting values at one participant-minute, mark only that
+   measure/slot ambiguous; do not pick first/last or average it, and omit that measure from aggregates. Exact duplicates must not
+   inflate counts or totals; unrelated measures/slots remain usable.
+- **Missing minutes (M-08):** do not impute. Aggregate observed eligible readings and expose coverage/valid counts; missing
+   steps are not zero and missing HR is not a measured value.
+- **Non-zero-second timestamps (M-09):** preserve and flag; do not silently floor where it creates a duplicate. Apply the
+   duplicate-slot rule to any resulting collision.
+- **Firmware fallback (T-02/T-03):** parse `device_label` when structured `firmware_version` is blank, preserving the raw blank
+   and recording fallback provenance. Flag `2.1.8` as unexpected for review; do not discard the device row.
+- **Sleep stage durations (S-01):** use `duration_min` for stage metrics as documented; flag mismatches with timestamp
+   intervals and preserve both values rather than silently recomputing.
+- **Sleep formulas:** `total_sleep_min` = sum of non-awake stage durations; `deep_sleep_pct` = deep minutes / total non-awake
+   minutes * 100; derived `sleep_efficiency_pct` = total non-awake minutes / (`sleep_end` - `sleep_onset` in minutes) * 100.
+   Preserve the supplied efficiency field separately for comparison.
+- **`sleep_end` (S-03/S-07/A-03):** treat as wake-up time and start of the final awake tail, consistent with 1,397/1,400
+   sessions. Assign by the explicit wake-up date; do not count the post-wake awake tail as sleep.
+
+### Later-gate directions selected
+
+6. **Week boundary (G2):** study-relative seven-day blocks anchored on 2026-01-08: Jan 8-14, Jan 15-21, Jan 22-28, and
+    Jan 29-Feb 4. Store `week_id`, `period_start_date`, and `period_end_date`.
+7. **Weekly schema (G2):** distinct wide participant-week table keyed by (`participant_id`, `week_id`), with period boundaries,
+    approved weekly measures, and valid-day/coverage fields. Exact statistical measures remain for G2 review.
+8. **Chronotype population (G3):** retain all enrolled participants in A/B cohorts; use metric-specific validity/coverage
+    denominators and report cohort size and valid counts. Cohort output grain and metric list remain open for G3.
+9. **Daily freshness (G4):** incremental processing by affected participant-day with idempotent MERGE on
+    (`participant_id`, `local_date`). Detect changed source inputs with a deterministic file manifest/checksum or equivalent;
+    source files do not provide arrival timestamps, so do not rely on watermarks alone.
+10. **Local storage (G4):** native DuckDB tables for local persisted outputs, using its transaction and MERGE semantics.
+      Iceberg remains a proposed cloud table format only.
+
+### Still open
+
+- Exact weekly statistical measures, chronotype output grain, and cohort metric list require consumer requirements and G2/G3 review.
+- Positive upper cutoff for steps; semantics of `_unit=steps_per_hour`; and whether firmware `2.1.8` is valid.
+- Minimum daily/weekly coverage thresholds and when an aggregate should be unavailable for insufficient coverage.
+- The 60-minute stuck-sensor threshold is provisional and should be revisited with validated device behavior or future data.
