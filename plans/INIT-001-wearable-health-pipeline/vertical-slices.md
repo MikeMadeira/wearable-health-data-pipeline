@@ -21,7 +21,7 @@ were inspected while planning**):
   policy, cohort definition and the daily-freshness mechanism are **human decisions**
   taken at gates after profiling. Slices must implement them as approved, not pre-empt them.
 - A3. `gold_participant_devices` is out of scope per the intent. `device_metadata.csv` is
-  landed in bronze (the intent lands all raw exports) but gets no silver or gold use unless
+  catalogued in `raw_manifest` (all raw exports are catalogued) but gets no silver or gold use unless
   profiling shows a kept output needs it.
 - A4. Local storage format (Parquet vs DuckDB tables) is decided at G4; criterion:
   closeness to Iceberg semantics (atomic, idempotent MERGE upserts).
@@ -64,12 +64,12 @@ Harness constraints that shape the order (from `validate_phase_paths` and its ca
 
 ## 3. Naming convention and layout (proposed, pending G1/G4)
 
-Under `output/` (ignored by Git): `bronze/`, `silver/`, `gold/`, `quality/`, plus a
+Under `output/` (ignored by Git): `silver/`, `gold/`, `quality/`, plus a
 human-readable `quality/report.md`. Table names:
 
 | Layer | Tables |
 |-------|--------|
-| bronze | `bronze_participants`, `bronze_device_metadata`, `bronze_wellness_survey`, `bronze_sleep`, `bronze_steps`, `bronze_heart_rate` (raw values plus source file and load metadata) |
+| bronze | the unchanged raw tree under `data/` plus the `raw_manifest` table (relative path, size, SHA-256, CSV `record_count`, source); no `bronze_*` copies of the data (ratified at INC-002 planning) |
 | silver | `silver_participants`, `silver_wellness_survey`, `silver_sleep_sessions`, `silver_sleep_stages`, `silver_steps_minute`, `silver_heart_rate_minute` |
 | quality | `quality_results` (rule, source, counts, outcome per run), `quality_rejects` (quarantined or excluded rows with reason and raw value) |
 | gold | `gold_clinical_daily`, `gold_biostat_weekly`, `gold_chronotype_cohort` |
@@ -81,7 +81,7 @@ Keys and grains below are proposed and finalized at the named gates.
 | ID | Kind | Outcome | Depends on | Verification |
 |----|------|---------|-----------|--------------|
 | INC-001 | notebook | Profiling notebook(s) plus findings document: observed defects with evidence, proposed rules, grain/key/timezone/week/cohort/freshness proposals; no pipeline code | none | Notebook runs top to bottom (nbclient); `data/` hashes unchanged; committed outputs aggregates only; every finding cites a query/count; human approval at G1 |
-| INC-002 | code | Walking skeleton: one CLI command lands all raw exports in bronze, builds silver for the thin source(s) chosen at G1, writes quality tables and report, produces `gold_clinical_daily` with the first columns via MERGE; adds DuckDB | INC-001 (G1) | Tests for grain/keys, quality rows, rerun idempotency, raw unchanged, bronze completeness; run on real data |
+| INC-002 | code | Walking skeleton: one CLI command catalogues all raw exports in `raw_manifest`, builds silver for the thin source(s) chosen at G1, writes quality tables and report, produces `gold_clinical_daily` with the first columns via MERGE; adds DuckDB | INC-001 (G1) | Tests for grain/keys, quality rows, rerun idempotency, raw unchanged, manifest completeness; run on real data |
 | INC-003 | code | Sleep end to end: silver sleep sessions/stages, derived metrics, sleep columns in `gold_clinical_daily` | INC-002 | Day assignment, stage/duration rules, derived metrics, additive-column check, rerun and corrected-input tests |
 | INC-004 | code | Steps end to end: silver per-minute steps, step columns in `gold_clinical_daily` | INC-002 | Grid/duplicate/range rules per approved policy, daily aggregates, additive-column check, rerun and corrected-input tests |
 | INC-005 | code | Heart rate end to end: silver per-minute HR with timestamp normalization and stuck-sensor flagging, HR columns in `gold_clinical_daily` | INC-002 | Naive/UTC handling, stuck-run flagging with raw preserved, flagged rows excluded from aggregates, additive-column check, rerun and corrected-input tests |
@@ -114,12 +114,12 @@ Contract lines list inputs, outputs, and key/grain, all "proposed, pending gates
 ### INC-002: Walking skeleton
 - Scope: CLI (single command, full-rebuild mode) introduced here with behavior; DuckDB
   runtime dependency added and justified (embedded SQL engine with MERGE, adequate for the
-  data size); bronze landing of all six raw sources including `device_metadata` (no mutation
+  data size); a `raw_manifest` table cataloguing all six raw sources including `device_metadata` (no mutation
   of raw); silver for the source(s) chosen at G1; `quality_results`, `quality_rejects`, and
   report; `gold_clinical_daily` with the first columns via MERGE on
   (`participant_id`, `local_date`). If the survey is not confirmed daily-grain at G1, the
   thin source is another one chosen at G1. Storage format selected (G4).
-- Contract: `data/**` -> `output/bronze|silver|quality|gold`; key proposed
+- Contract: `data/**` -> `raw_manifest` and `output/silver|quality|gold`; key proposed
   (`participant_id`, `local_date`) in `gold_clinical_daily`.
 - Out of scope: other sources' silver, weekly/cohort, incremental mode, device metadata
   silver/gold.
@@ -134,9 +134,9 @@ Contract lines list inputs, outputs, and key/grain, all "proposed, pending gates
   that source's columns on matched keys.
 - Each slice owns the rerun, corrected-input and idempotency tests for its own silver and
   gold columns.
-- Contracts: INC-003 `bronze_sleep` -> `silver_sleep_sessions` (key participant, wake
-  date), `silver_sleep_stages`; INC-004 `bronze_steps` -> `silver_steps_minute` (key
-  participant, minute timestamp); INC-005 `bronze_heart_rate` -> `silver_heart_rate_minute`
+- Contracts: INC-003 raw `sleep` files -> `silver_sleep_sessions` (key participant, wake
+  date), `silver_sleep_stages`; INC-004 raw `steps` files -> `silver_steps_minute` (key
+  participant, minute timestamp); INC-005 raw `heart_rate` files -> `silver_heart_rate_minute`
   (same key, after timestamp normalization).
 - Out of scope: other sources, weekly/cohort, incremental mode, cross-source derived
   metrics beyond those approved at G1.

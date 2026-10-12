@@ -92,8 +92,8 @@ choice that INC-003 to INC-005 extend.
   unchanged.
 - Deliberate deviation from the vertical-slice plan: the plan's `bronze_*` tables are not
   created in this increment. The manifest replaces them, and INC-003 to INC-005 read raw
-  files directly into their silver tables. The plan and initiative wording should be
-  updated later if the human agrees.
+  files directly into their silver tables. The human accepted this at planning review and
+  the plan and initiative wording were updated to match.
 - Do not change the harness (`scripts/`, `.github/`), the uv/pyenv setup beyond adding
   DuckDB, the README structure, `data/`, or `tests/test_orchestrator.py`. No public API
   exists yet in `src/` to preserve.

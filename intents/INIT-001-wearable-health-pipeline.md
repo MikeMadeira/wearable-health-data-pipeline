@@ -23,7 +23,7 @@ data, and follow the justified design trade-offs, including rejected alternative
 ## Desired End-to-End Capability
 
 1. Read the immutable raw exports from `data/`; they are never modified or committed.
-2. Land them in a bronze layer, then validate and normalize them into a silver layer
+2. Treat the unchanged raw files plus a `raw_manifest` table as the bronze layer, then validate and normalize them into a silver layer
    that is the single validated source of truth.
 3. Persist data-quality outcomes as queryable tables plus a human-readable report.
 4. Derive gold outputs from silver only: daily clinical analytics, a distinct weekly
@@ -41,7 +41,7 @@ data, and follow the justified design trade-offs, including rejected alternative
   proposes how to correct and guard against data problems, and informs the schemas,
   grains and join keys that serve both consumers. Distinguish observed defects from
   assumptions.
-- Use layers bronze (raw landed, immutable), silver (validated source of truth) and
+- Use layers bronze (the unchanged raw tree plus a `raw_manifest` table; immutable), silver (validated source of truth) and
   gold (daily clinical, weekly biostatistics, chronotype cohort). Daily and weekly
   outputs both derive from silver.
 - Give the daily and weekly outputs different schemas. Each output has a documented,
