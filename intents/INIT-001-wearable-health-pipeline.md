@@ -13,7 +13,8 @@ trustworthy, analysis-ready tables for two consumers:
 It also provides chronotype cohort analysis using sleep and activity. Both consumer
 paths derive from one shared, validated source of truth.
 
-The initiative covers every challenge deliverable except those listed under Out of
+The initiative covers the client requirements in
+`requirements/business_pipeline_requirements.md` except those listed under Out of
 Scope: pipeline code, a README that explains end-to-end execution, an architecture
 diagram, analytical query output, and an AI usage disclosure. Success means a reviewer
 can run the pipeline from a clean checkout, rerun it without duplicating or corrupting

@@ -1,7 +1,9 @@
 # Wearable Health Data Pipeline
 
-Starter repository for the Meridian Health Analytics data engineering challenge. The
-study exports are available under `data/` in this workspace; the raw files are ignored
+Repository for the Meridian Health Analytics wearable-health pipeline proposal. The
+client business requirements are documented in
+`requirements/business_pipeline_requirements.md`. The study exports are available
+under `data/` in this workspace; the raw files are ignored
 by Git because they are large source inputs, not project artifacts. The dictionary is
 kept at `data/data_dictionary.md`.
 
@@ -44,8 +46,7 @@ command. When changing dependencies, update `pyproject.toml`, run
 `uv lock --python 3.12.6`, and commit both files. `uv sync --active --python 3.12.6 --locked` then
 reproduces the locked environment in the currently activated pyenv virtualenv.
 
-The dataset is publicly readable from the challenge bucket if it needs to be fetched
-again:
+The study dataset can be fetched again from the client-provided S3 location:
 
 ```bash
 aws s3 cp s3://de-tech-assessment-396587179375-us-east-1-an/data/ ./data/ \
@@ -57,8 +58,9 @@ or generated output to Git.
 
 ## Agent workflow
 
-Create and review a human-authored initiative intent before slicing the whole challenge.
-After the slicing proposal is approved, create one increment intent per vertical slice.
+Create and review a human-authored initiative intent before slicing the client
+requirements. After the slicing proposal is approved, create one increment intent
+per vertical slice.
 The automated runner requires a clean dedicated Git branch/worktree and a committed
 baseline; it runs the phase agents and commits only after report and test gates pass.
 Review every generated report and commit before continuing.
@@ -125,12 +127,14 @@ unmatched records are counted and reported, while explicit business rules govern
 whether suspect measurements are quarantined, flagged, or excluded from aggregates.
 Daily and weekly outputs should derive from the same validated source of truth.
 
-## Challenge deliverables
+## Client requirements
 
-The implementation must include daily clinical outputs, weekly biostatistics outputs,
-chronotype cohort metrics, and `gold_participant_devices`. The final README should
-document measured data issues, quality rules, table grains, idempotency, operational
-trade-offs, analytical query output, and the final architecture.
+The current initiative delivers daily clinical outputs, weekly biostatistics outputs,
+and chronotype cohort metrics. The source client brief also requires
+`gold_participant_devices`; that table is currently excluded by `INIT-001` and needs
+an explicit scope decision. The final README should document measured data issues,
+quality rules, table grains, idempotency, operational trade-offs, analytical query
+output, and the final architecture.
 
 ## AI usage disclosure
 

@@ -1,7 +1,9 @@
 # Repository Brief
 
-This repository implements the Meridian wearable-health data engineering challenge.
-The raw study data is in `data/` locally and must remain immutable and out of Git.
+This repository implements the Meridian Health Analytics wearable-health pipeline
+proposal. The raw study data is in `data/` locally and must remain immutable and out
+of Git. The client brief is documented in
+`requirements/business_pipeline_requirements.md`.
 
 ## Working rules
 
@@ -36,7 +38,7 @@ The raw study data is in `data/` locally and must remain immutable and out of Gi
   Git working tree. Do not skip a phase gate.
 - Broad work must first produce a reviewed vertical-slice proposal under `plans/`.
 
-## Challenge outcomes
+## Client requirements
 
 The eventual pipeline must provide daily clinical analytics, a distinct weekly
 biostatistics schema, and chronotype cohort analysis using sleep and activity. It must be containerized, reproducible, and idempotent. The
