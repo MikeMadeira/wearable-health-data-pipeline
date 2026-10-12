@@ -14,6 +14,7 @@ from typing import Any
 import duckdb
 
 from wearable_pipeline.normalize import parse_integer, parse_iso_date
+from wearable_pipeline.sleep import SLEEP_RULES, SleepLayer, build_sleep_layer
 
 DEFAULT_STUDY_START = date(2026, 1, 8)
 DEFAULT_STUDY_DAYS = 28
@@ -73,6 +74,7 @@ RULES = {
         "wellness_survey", "exclude_from_output", "medium",
         "date is outside the study window"),
 }
+RULES = {**RULES, **SLEEP_RULES}
 INTEGER_FIELDS = ("age", "height_cm", "max_heart_rate")
 
 _FIXED_SOURCES = {
@@ -230,6 +232,38 @@ def _transform(
     }
 
 
+def _read_sleep_files(data_dir: Path, manifest: list[tuple[Any, ...]]) -> dict[str, list[Any]]:
+    files: dict[str, list[Any]] = {}
+    for relative, source, *_ in manifest:
+        if source != "sleep":
+            continue
+        try:
+            content = json.loads((data_dir / relative).read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError) as error:
+            raise PipelineError(f"cannot read sleep file {relative}: {error}") from error
+        if not isinstance(content, list):
+            raise PipelineError(f"{relative} must contain a JSON array")
+        if not all(isinstance(item, dict) for item in content):
+            raise PipelineError(f"{relative} must contain only JSON objects")
+        files[relative] = content
+    return files
+
+
+SLEEP_GOLD_COLUMNS = (
+    ("total_sleep_min", "INTEGER"), ("deep_sleep_pct", "DOUBLE"),
+    ("sleep_efficiency_pct", "DOUBLE"), ("sleep_session_count", "INTEGER"),
+    ("sleep_present", "BOOLEAN"), ("sleep_quality_flags", "VARCHAR"),
+)
+
+
+def _sleep_gold(sleep: SleepLayer, pid: str, day: date) -> tuple[Any, ...]:
+    entry = sleep.daily.get((pid, day))
+    if entry is None:
+        return (None, None, None, 0, False, None)
+    return (entry.total_sleep_min, entry.deep_sleep_pct, entry.sleep_efficiency_pct,
+            entry.sleep_session_count, entry.sleep_session_count > 0, entry.sleep_quality_flags)
+
+
 def _write_report(path: Path, run_id: str, manifest_count: int,
                   results: list[tuple[Any, ...]]) -> None:
     lines = [
@@ -279,6 +313,16 @@ def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
                  "readiness_score INTEGER, sleep_quality_score INTEGER, is_orphan BOOLEAN, "
                  "is_duplicate_key BOOLEAN, is_out_of_window BOOLEAN, quality_flags VARCHAR",
                  t["silver_s"])
+        _replace(con, "silver_sleep_sessions",
+                 "participant_id VARCHAR, local_date DATE, sleep_onset TIMESTAMP, "
+                 "sleep_end TIMESTAMP, supplied_efficiency_pct DOUBLE, restlessness DOUBLE, "
+                 "is_duplicate_key BOOLEAN, is_orphan BOOLEAN, is_out_of_window BOOLEAN, "
+                 "quality_flags VARCHAR", t["sleep"].sessions)
+        _replace(con, "silver_sleep_stages",
+                 "participant_id VARCHAR, local_date DATE, stage_index INTEGER, "
+                 "stage VARCHAR, start_time TIMESTAMP, end_time TIMESTAMP, "
+                 "duration_min INTEGER, derived_duration_min DOUBLE, quality_flags VARCHAR",
+                 t["sleep"].stages)
         _replace(con, "quality_results",
                  "run_id VARCHAR, rule_id VARCHAR, source VARCHAR, handling VARCHAR, "
                  "severity VARCHAR, reason VARCHAR, checked_count BIGINT, failed_count BIGINT",
@@ -292,12 +336,17 @@ def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
             "stress_score INTEGER, readiness_score INTEGER, sleep_quality_score INTEGER, "
             "survey_present BOOLEAN, survey_row_count INTEGER, "
             "survey_valid_score_count INTEGER, survey_quality_flags VARCHAR, "
-            "PRIMARY KEY (participant_id, local_date))")
+            + ", ".join(f"{name} {kind}" for name, kind in SLEEP_GOLD_COLUMNS)
+            + ", PRIMARY KEY (participant_id, local_date))")
+        for name, kind in SLEEP_GOLD_COLUMNS:
+            con.execute(
+                f"ALTER TABLE gold_clinical_daily ADD COLUMN IF NOT EXISTS {name} {kind}")
         con.execute(
             "CREATE OR REPLACE TEMP TABLE gold_stage AS "
             "SELECT * FROM gold_clinical_daily LIMIT 0")
         if t["gold"]:
-            con.executemany("INSERT INTO gold_stage VALUES (?,?,?,?,?,?,?,?,?,?)", t["gold"])
+            marks = ",".join("?" * len(t["gold"][0]))
+            con.executemany(f"INSERT INTO gold_stage VALUES ({marks})", t["gold"])
         con.execute(
             "MERGE INTO gold_clinical_daily AS g USING gold_stage AS s "
             "ON g.participant_id = s.participant_id AND g.local_date = s.local_date "
@@ -307,7 +356,11 @@ def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
             "sleep_quality_score = s.sleep_quality_score, survey_present = s.survey_present, "
             "survey_row_count = s.survey_row_count, "
             "survey_valid_score_count = s.survey_valid_score_count, "
-            "survey_quality_flags = s.survey_quality_flags "
+            "survey_quality_flags = s.survey_quality_flags, "
+            "total_sleep_min = s.total_sleep_min, deep_sleep_pct = s.deep_sleep_pct, "
+            "sleep_efficiency_pct = s.sleep_efficiency_pct, "
+            "sleep_session_count = s.sleep_session_count, sleep_present = s.sleep_present, "
+            "sleep_quality_flags = s.sleep_quality_flags "
             "WHEN NOT MATCHED THEN INSERT BY NAME")
         con.execute("DROP TABLE gold_stage")
         con.execute("COMMIT")
@@ -340,10 +393,20 @@ def run_pipeline(
     participants = _read_required(data_dir, PARTICIPANTS_PATH, PARTICIPANT_COLUMNS)
     survey = _read_required(data_dir, SURVEY_PATH, SURVEY_COLUMNS)
     manifest = _build_manifest(data_dir)
+    sleep_files = _read_sleep_files(data_dir, manifest)
     run_id = _run_id(manifest)
     window = [study_start + timedelta(days=i) for i in range(study_days)]
 
     t = _transform(participants, survey, window)
+    enrolled = {r["participant_id"] for r in participants}
+    sleep: SleepLayer = build_sleep_layer(sleep_files, enrolled, window)
+    t["sleep"] = sleep
+    t["rejects"] = t["rejects"] + sleep.rejects
+    t["failed"] = t["failed"] + sleep.failed
+    t["checked"]["sleep"] = sleep.checked
+    t["gold"] = [
+        (*row, *_sleep_gold(sleep, row[0], row[1])) for row in t["gold"]
+    ]
     results = []
     for rule_id in sorted(RULES):
         source, handling, severity, reason = RULES[rule_id]
