@@ -126,6 +126,36 @@ REASONS = {
     "SURVEY_DATE_OUT_OF_WINDOW": "date is outside the study window",
 }
 
+SLEEP_REASONS = {
+    "SLEEP_ORPHAN_PARTICIPANT": "sleep participant_id is not enrolled in participants.csv",
+    "SLEEP_DUPLICATE_PARTICIPANT_DAY": "participant_id and date occur in more than one sleep session",
+    "SLEEP_DATE_UNPARSEABLE": "sleep date is not a valid YYYY-MM-DD calendar date",
+    "SLEEP_DATE_OUT_OF_WINDOW": "sleep date is outside the study window",
+    "SLEEP_SESSION_FIELD_INVALID": "sleep_onset, sleep_end, efficiency_pct or restlessness is missing or invalid",
+    "SLEEP_STAGE_INVALID": "a sleep stage has an unknown name, an invalid duration or an unparseable time",
+    "SLEEP_STAGE_DURATION_MISMATCH": "a sleep stage duration differs from its timestamp interval",
+    "SLEEP_STAGE_GAP_OR_OVERLAP": "consecutive sleep stages have a gap or overlap",
+    "SLEEP_SPAN_OUTLIER": "sleep session span is longer than 12 hours",
+    "SLEEP_FINAL_STAGE_MISALIGNED": "final sleep stage does not start at sleep_end",
+    "SLEEP_EFFICIENCY_MISMATCH": "supplied efficiency_pct differs from the derived efficiency by more than 1 point",
+    "SLEEP_ONSET_NOT_MINUTE_ALIGNED": "sleep_onset is not aligned to a whole minute",
+}
+
+SLEEP_HANDLING = {
+    "SLEEP_ORPHAN_PARTICIPANT": ("exclude_from_output", "medium"),
+    "SLEEP_DUPLICATE_PARTICIPANT_DAY": ("withhold_field", "high"),
+    "SLEEP_DATE_UNPARSEABLE": ("exclude_from_output", "medium"),
+    "SLEEP_DATE_OUT_OF_WINDOW": ("exclude_from_output", "medium"),
+    "SLEEP_SESSION_FIELD_INVALID": ("withhold_field", "medium"),
+    "SLEEP_STAGE_INVALID": ("withhold_field", "medium"),
+    "SLEEP_STAGE_DURATION_MISMATCH": ("flag", "medium"),
+    "SLEEP_STAGE_GAP_OR_OVERLAP": ("flag", "medium"),
+    "SLEEP_SPAN_OUTLIER": ("flag", "medium"),
+    "SLEEP_FINAL_STAGE_MISALIGNED": ("flag", "medium"),
+    "SLEEP_EFFICIENCY_MISMATCH": ("flag", "medium"),
+    "SLEEP_ONSET_NOT_MINUTE_ALIGNED": ("flag", "medium"),
+}
+
 RULES = [
     ("PARTICIPANTS_INTEGER_INVALID", "participants"),
     ("PARTICIPANTS_KEY_DUPLICATE", "participants"),
@@ -134,7 +164,7 @@ RULES = [
     ("SURVEY_DUPLICATE_PARTICIPANT_DAY", "wellness_survey"),
     ("SURVEY_ORPHAN_PARTICIPANT", "wellness_survey"),
     ("SURVEY_SCORE_INVALID", "wellness_survey"),
-]
+] + [(rule, "sleep") for rule in SLEEP_REASONS]
 
 
 # --- output locations, manifest and run id -------------------------------------------
@@ -246,12 +276,16 @@ def test_gold_values_and_presence_flags(tmp_path):
         "participant_id": "P001", "local_date": WINDOW[0], "fatigue_score": 3, "stress_score": 3,
         "readiness_score": 8, "sleep_quality_score": 3, "survey_present": True,
         "survey_row_count": 1, "survey_valid_score_count": 4, "survey_quality_flags": None,
+        "total_sleep_min": None, "deep_sleep_pct": None, "sleep_efficiency_pct": None,
+        "sleep_session_count": 0, "sleep_present": False, "sleep_quality_flags": None,
     }
     assert gold(result, "P002", WINDOW[2]) == {
         "participant_id": "P002", "local_date": WINDOW[2], "fatigue_score": None,
         "stress_score": None, "readiness_score": None, "sleep_quality_score": None,
         "survey_present": False, "survey_row_count": 0, "survey_valid_score_count": 0,
         "survey_quality_flags": None,
+        "total_sleep_min": None, "deep_sleep_pct": None, "sleep_efficiency_pct": None,
+        "sleep_session_count": 0, "sleep_present": False, "sleep_quality_flags": None,
     }
 
 
@@ -359,8 +393,10 @@ def test_every_rule_reports_one_row_even_with_zero_failures(tmp_path):
     assert results[("PARTICIPANTS_KEY_DUPLICATE", "participants")][:2] == ("flag", "high")
     assert results[("PARTICIPANTS_INTEGER_INVALID", "participants")][:2] == ("withhold_field", "medium")
     assert results[("SURVEY_DATE_UNPARSEABLE", "wellness_survey")][:2] == ("exclude_from_output", "medium")
+    for rule, handling in SLEEP_HANDLING.items():
+        assert results[(rule, "sleep")][:2] == handling
     for key, value in results.items():
-        expected_checked = 2 if key[1] == "participants" else 5
+        expected_checked = {"participants": 2, "wellness_survey": 5, "sleep": 0}[key[1]]
         assert value[-3:] == (expected_checked, 0, result.run_id)
     assert query(result, "SELECT count(*) FROM quality_rejects") == [(0,)]
 
@@ -394,6 +430,18 @@ def test_report_lists_run_id_and_one_row_per_rule(tmp_path):
     assert rows == [
         ["PARTICIPANTS_INTEGER_INVALID", "participants", "withhold_field", "medium", "2", "0"],
         ["PARTICIPANTS_KEY_DUPLICATE", "participants", "flag", "high", "2", "0"],
+        ["SLEEP_DATE_OUT_OF_WINDOW", "sleep", "exclude_from_output", "medium", "0", "0"],
+        ["SLEEP_DATE_UNPARSEABLE", "sleep", "exclude_from_output", "medium", "0", "0"],
+        ["SLEEP_DUPLICATE_PARTICIPANT_DAY", "sleep", "withhold_field", "high", "0", "0"],
+        ["SLEEP_EFFICIENCY_MISMATCH", "sleep", "flag", "medium", "0", "0"],
+        ["SLEEP_FINAL_STAGE_MISALIGNED", "sleep", "flag", "medium", "0", "0"],
+        ["SLEEP_ONSET_NOT_MINUTE_ALIGNED", "sleep", "flag", "medium", "0", "0"],
+        ["SLEEP_ORPHAN_PARTICIPANT", "sleep", "exclude_from_output", "medium", "0", "0"],
+        ["SLEEP_SESSION_FIELD_INVALID", "sleep", "withhold_field", "medium", "0", "0"],
+        ["SLEEP_SPAN_OUTLIER", "sleep", "flag", "medium", "0", "0"],
+        ["SLEEP_STAGE_DURATION_MISMATCH", "sleep", "flag", "medium", "0", "0"],
+        ["SLEEP_STAGE_GAP_OR_OVERLAP", "sleep", "flag", "medium", "0", "0"],
+        ["SLEEP_STAGE_INVALID", "sleep", "withhold_field", "medium", "0", "0"],
         ["SURVEY_DATE_OUT_OF_WINDOW", "wellness_survey", "exclude_from_output", "medium", "6", "0"],
         ["SURVEY_DATE_UNPARSEABLE", "wellness_survey", "exclude_from_output", "medium", "6", "0"],
         ["SURVEY_DUPLICATE_PARTICIPANT_DAY", "wellness_survey", "withhold_field", "high", "6", "0"],
@@ -543,8 +591,8 @@ def test_pipeline_error_for_non_positive_study_days(tmp_path):
 def test_every_rule_carries_its_exact_reason_text(tmp_path):
     result = run(make_data(tmp_path), tmp_path / "out")
     rows = query(result, "SELECT rule_id, reason FROM quality_results")
-    assert dict(rows) == REASONS
-    assert len(rows) == len(REASONS)
+    assert dict(rows) == {**REASONS, **SLEEP_REASONS}
+    assert len(rows) == len(REASONS) + len(SLEEP_REASONS)
 
 
 def test_unrecognised_files_are_catalogued_as_unclassified(tmp_path):
@@ -570,6 +618,9 @@ def test_gold_schema_types_and_primary_key(tmp_path):
         "sleep_quality_score": "INTEGER", "survey_present": "BOOLEAN",
         "survey_row_count": "INTEGER", "survey_valid_score_count": "INTEGER",
         "survey_quality_flags": "VARCHAR",
+        "total_sleep_min": "INTEGER", "deep_sleep_pct": "DOUBLE",
+        "sleep_efficiency_pct": "DOUBLE", "sleep_session_count": "INTEGER",
+        "sleep_present": "BOOLEAN", "sleep_quality_flags": "VARCHAR",
     }
     assert types == expected
     keys = query(result, "SELECT constraint_column_names FROM duckdb_constraints() "

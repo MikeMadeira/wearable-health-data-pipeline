@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 
 _INT = re.compile(r"[+-]?[0-9]+")
 _ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -34,3 +34,12 @@ def parse_iso_date(raw: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+def parse_local_timestamp(raw: object) -> datetime | None:
+    """Return a naive UTC-05:00 local ``datetime`` for an ISO 8601 timestamp, else ``None``.
+
+    A naive value is already local; ``Z`` or an offset is converted. See
+    ``specs/INC-003.md`` section 3 for the accepted layouts.
+    """
+    raise NotImplementedError
