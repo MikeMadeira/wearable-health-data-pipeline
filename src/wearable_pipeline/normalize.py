@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
+
+_INT = re.compile(r"[+-]?[0-9]+")
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_INT_MIN, _INT_MAX = -(2**31), 2**31 - 1
 
 
 def parse_integer(raw: str) -> int | None:
@@ -10,7 +15,11 @@ def parse_integer(raw: str) -> int | None:
 
     Surrounding whitespace is ignored; see ``specs/INC-002-01.md`` section 4.
     """
-    raise NotImplementedError
+    value = raw.strip()
+    if not _INT.fullmatch(value):
+        return None
+    number = int(value)
+    return number if _INT_MIN <= number <= _INT_MAX else None
 
 
 def parse_iso_date(raw: str) -> date | None:
@@ -18,4 +27,10 @@ def parse_iso_date(raw: str) -> date | None:
 
     Surrounding whitespace is ignored; no other layout is converted.
     """
-    raise NotImplementedError
+    value = raw.strip()
+    if not _ISO_DATE.fullmatch(value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None

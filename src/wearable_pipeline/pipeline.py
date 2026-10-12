@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -13,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+
+from wearable_pipeline.normalize import parse_integer, parse_iso_date
 
 DEFAULT_STUDY_START = date(2026, 1, 8)
 DEFAULT_STUDY_DAYS = 28
@@ -62,10 +63,17 @@ RULES = {
     "SURVEY_SCORE_INVALID": (
         "wellness_survey", "withhold_field", "medium",
         "a score is blank, not an integer, or outside its allowed range"),
+    "PARTICIPANTS_INTEGER_INVALID": (
+        "participants", "withhold_field", "medium",
+        "age, height_cm or max_heart_rate is not an integer"),
+    "SURVEY_DATE_UNPARSEABLE": (
+        "wellness_survey", "exclude_from_output", "medium",
+        "date is not a valid YYYY-MM-DD calendar date"),
     "SURVEY_DATE_OUT_OF_WINDOW": (
         "wellness_survey", "exclude_from_output", "medium",
-        "date is not a valid ISO date or is outside the study window"),
+        "date is outside the study window"),
 }
+INTEGER_FIELDS = ("age", "height_cm", "max_heart_rate")
 
 _FIXED_SOURCES = {
     "participants/participants.csv": "participants",
@@ -74,8 +82,6 @@ _FIXED_SOURCES = {
     "data_dictionary.md": "documentation",
 }
 _EVENT_SOURCES = {"sleep.json": "sleep", "steps.json": "steps", "heart_rate.json": "heart_rate"}
-_INT = re.compile(r"[+-]?[0-9]+")
-_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 def _classify(relative: str) -> str:
@@ -133,20 +139,8 @@ def _run_id(manifest: list[tuple[Any, ...]]) -> str:
 
 
 def _parse_score(raw: str, low: int, high: int) -> int | None:
-    value = raw.strip()
-    if not _INT.fullmatch(value):
-        return None
-    number = int(value)
-    return number if low <= number <= high else None
-
-
-def _parse_date(raw: str) -> date | None:
-    if not _ISO_DATE.fullmatch(raw):
-        return None
-    try:
-        return date.fromisoformat(raw)
-    except ValueError:
-        return None
+    number = parse_integer(raw)
+    return number if number is not None and low <= number <= high else None
 
 
 def _flags(rule_ids: set[str]) -> str | None:
@@ -175,10 +169,16 @@ def _transform(
         flags = {"PARTICIPANTS_KEY_DUPLICATE"} if duplicate else set()
         if duplicate:
             reject_rows.append(("PARTICIPANTS_KEY_DUPLICATE", PARTICIPANTS_PATH, n, row))
-        silver_p.append((row["participant_id"], n, *(row[c] for c in PARTICIPANT_COLUMNS[1:]),
-                         duplicate, _flags(flags)))
+        ints = {c: parse_integer(row[c]) for c in INTEGER_FIELDS}
+        if any(v is None for v in ints.values()):
+            flags.add("PARTICIPANTS_INTEGER_INVALID")
+            reject_rows.append(("PARTICIPANTS_INTEGER_INVALID", PARTICIPANTS_PATH, n, row))
+        silver_p.append((
+            row["participant_id"], row["device_id"], ints["age"], ints["height_cm"],
+            row["gender"], row["chronotype"], ints["max_heart_rate"], duplicate, _flags(flags),
+        ))
 
-    parsed = [_parse_date(r["date"]) for r in survey]
+    parsed = [parse_iso_date(r["date"]) for r in survey]
     day_counts = Counter(
         (r["participant_id"], d) for r, d in zip(survey, parsed) if d is not None
     )
@@ -188,7 +188,8 @@ def _transform(
         scores = [_parse_score(row[c], *SCORE_RANGES[c]) for c in SCORES]
         orphan = row["participant_id"] not in enrolled_set
         duplicate = local is not None and day_counts[(row["participant_id"], local)] > 1
-        out_of_window = local is None or local not in window_set
+        unparseable = local is None
+        out_of_window = local is not None and local not in window_set
         flags = set()
         if orphan:
             flags.add("SURVEY_ORPHAN_PARTICIPANT")
@@ -196,16 +197,18 @@ def _transform(
             flags.add("SURVEY_DUPLICATE_PARTICIPANT_DAY")
         if any(s is None for s in scores):
             flags.add("SURVEY_SCORE_INVALID")
+        if unparseable:
+            flags.add("SURVEY_DATE_UNPARSEABLE")
         if out_of_window:
             flags.add("SURVEY_DATE_OUT_OF_WINDOW")
         for rule in flags:
             reject_rows.append((rule, SURVEY_PATH, n, row))
         flag_text = _flags(flags)
         silver_s.append((
-            row["participant_id"], n, row["date"], *(row[c] for c in SCORES), local, *scores,
+            row["participant_id"], local, *scores,
             orphan, duplicate, out_of_window, flag_text,
         ))
-        if not orphan and not out_of_window:
+        if not orphan and not unparseable and not out_of_window:
             contributing.setdefault((row["participant_id"], local), []).append((scores, flag_text))
 
     gold = []
@@ -266,14 +269,12 @@ def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
                  "relative_path VARCHAR, source VARCHAR, size_bytes BIGINT, sha256 VARCHAR, "
                  "record_count BIGINT", manifest)
         _replace(con, "silver_participants",
-                 "participant_id VARCHAR, source_row_number INTEGER, device_id VARCHAR, "
-                 "age VARCHAR, height_cm VARCHAR, gender VARCHAR, chronotype VARCHAR, "
-                 "max_heart_rate VARCHAR, is_duplicate_key BOOLEAN, quality_flags VARCHAR",
+                 "participant_id VARCHAR, device_id VARCHAR, "
+                 "age INTEGER, height_cm INTEGER, gender VARCHAR, chronotype VARCHAR, "
+                 "max_heart_rate INTEGER, is_duplicate_key BOOLEAN, quality_flags VARCHAR",
                  t["silver_p"])
         _replace(con, "silver_wellness_survey",
-                 "participant_id VARCHAR, source_row_number INTEGER, date_raw VARCHAR, "
-                 "fatigue_score_raw VARCHAR, stress_score_raw VARCHAR, "
-                 "readiness_score_raw VARCHAR, sleep_quality_score_raw VARCHAR, "
+                 "participant_id VARCHAR, "
                  "local_date DATE, fatigue_score INTEGER, stress_score INTEGER, "
                  "readiness_score INTEGER, sleep_quality_score INTEGER, is_orphan BOOLEAN, "
                  "is_duplicate_key BOOLEAN, is_out_of_window BOOLEAN, quality_flags VARCHAR",
