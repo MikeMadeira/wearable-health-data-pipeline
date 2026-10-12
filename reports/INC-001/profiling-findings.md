@@ -198,8 +198,11 @@ all source records and raw values; handle defects at field/measure level so unre
 - **Sleep stage durations (S-01):** use `duration_min` for stage metrics as documented; flag mismatches with timestamp
    intervals and preserve both values rather than silently recomputing.
 - **Sleep formulas:** `total_sleep_min` = sum of non-awake stage durations; `deep_sleep_pct` = deep minutes / total non-awake
-   minutes * 100; derived `sleep_efficiency_pct` = total non-awake minutes / (`sleep_end` - `sleep_onset` in minutes) * 100.
-   Preserve the supplied efficiency field separately for comparison.
+   minutes * 100; derived `sleep_efficiency_pct` = sum of non-awake `duration_min` / sum of all stage `duration_min` * 100.
+   The denominator is the stage timeline and does not use `sleep_end` or `sleep_onset`. The earlier span-based denominator
+   (`sleep_end` - `sleep_onset`) is superseded: it gave about 100% for 1,393 of 1,400 sessions (median 100, observed range
+   26.9 to 158.8), while the stage-based value ranges from 74.6 to 94.4 (median 87.4). Preserve the supplied efficiency field
+   separately for comparison; it matches the stage-based value within 1 point in only 7 sessions.
 - **`sleep_end` (S-03/S-07/A-03):** treat as wake-up time and start of the final awake tail, consistent with 1,397/1,400
    sessions. Assign by the explicit wake-up date; do not count the post-wake awake tail as sleep.
 
