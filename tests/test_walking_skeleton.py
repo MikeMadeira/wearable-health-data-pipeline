@@ -117,16 +117,20 @@ def tree_hashes(root: Path) -> dict[str, str]:
 
 
 REASONS = {
+    "PARTICIPANTS_INTEGER_INVALID": "age, height_cm or max_heart_rate is not an integer",
+    "SURVEY_DATE_UNPARSEABLE": "date is not a valid YYYY-MM-DD calendar date",
     "PARTICIPANTS_KEY_DUPLICATE": "participant_id occurs in more than one participants row",
     "SURVEY_ORPHAN_PARTICIPANT": "participant_id is not enrolled in participants.csv",
     "SURVEY_DUPLICATE_PARTICIPANT_DAY": "participant_id and date occur in more than one survey row",
     "SURVEY_SCORE_INVALID": "a score is blank, not an integer, or outside its allowed range",
-    "SURVEY_DATE_OUT_OF_WINDOW": "date is not a valid ISO date or is outside the study window",
+    "SURVEY_DATE_OUT_OF_WINDOW": "date is outside the study window",
 }
 
 RULES = [
+    ("PARTICIPANTS_INTEGER_INVALID", "participants"),
     ("PARTICIPANTS_KEY_DUPLICATE", "participants"),
     ("SURVEY_DATE_OUT_OF_WINDOW", "wellness_survey"),
+    ("SURVEY_DATE_UNPARSEABLE", "wellness_survey"),
     ("SURVEY_DUPLICATE_PARTICIPANT_DAY", "wellness_survey"),
     ("SURVEY_ORPHAN_PARTICIPANT", "wellness_survey"),
     ("SURVEY_SCORE_INVALID", "wellness_survey"),
@@ -186,27 +190,24 @@ def test_run_id_changes_when_an_input_changes(tmp_path):
 # --- silver ---------------------------------------------------------------------------
 
 
-def test_silver_participants_keeps_every_row_with_raw_values(tmp_path):
+def test_silver_participants_keeps_every_row_with_typed_values(tmp_path):
     result = run(make_data(tmp_path), tmp_path / "out")
-    assert query(result, "SELECT participant_id, source_row_number, device_id, age, height_cm, "
+    assert query(result, "SELECT participant_id, device_id, age, height_cm, "
                          "gender, chronotype, max_heart_rate, is_duplicate_key, quality_flags "
-                         "FROM silver_participants ORDER BY source_row_number") == [
-        (*P001[:1], 1, *P001[1:], False, None),
-        (*P002[:1], 2, *P002[1:], False, None),
+                         "FROM silver_participants ORDER BY participant_id") == [
+        ("P001", "FBT-0001-AAAAAAAA", 38, 183, "male", "B", 167, False, None),
+        ("P002", "FBT-0002-BBBBBBBB", 31, 181, "male", "A", 199, False, None),
     ]
 
 
-def test_silver_survey_keeps_every_row_raw_and_normalized(tmp_path):
+def test_silver_survey_keeps_every_row_normalized(tmp_path):
     result = run(make_data(tmp_path), tmp_path / "out")
-    rows = query(result, "SELECT participant_id, source_row_number, date_raw, local_date, "
-                         "fatigue_score_raw, fatigue_score, readiness_score_raw, readiness_score, "
+    rows = query(result, "SELECT participant_id, local_date, fatigue_score, readiness_score, "
                          "is_orphan, is_duplicate_key, is_out_of_window, quality_flags "
-                         "FROM silver_wellness_survey ORDER BY source_row_number")
+                         "FROM silver_wellness_survey ORDER BY participant_id, local_date")
     assert len(rows) == 5
-    assert rows[0] == ("P001", 1, "2026-01-08", date(2026, 1, 8), "3", 3, "8", 8,
-                       False, False, False, None)
-    assert rows[3] == ("P002", 4, "2026-01-08", date(2026, 1, 8), "2", 2, "6", 6,
-                       False, False, False, None)
+    assert rows[0] == ("P001", date(2026, 1, 8), 3, 8, False, False, False, None)
+    assert rows[3] == ("P002", date(2026, 1, 8), 2, 6, False, False, False, None)
 
 
 def test_orphan_participant_is_kept_in_silver_and_absent_from_gold(tmp_path):
@@ -222,9 +223,9 @@ def test_duplicate_participant_key_rows_are_all_kept_and_flagged(tmp_path):
     duplicate = [P001[:1] + ["FBT-0001-ZZZZZZZZ"] + P001[2:]]
     result = run(make_data(tmp_path, participants=[P001, P002] + duplicate), tmp_path / "out")
     assert query(result, "SELECT count(*) FROM silver_participants") == [(3,)]
-    assert query(result, "SELECT source_row_number FROM silver_participants WHERE is_duplicate_key "
+    assert query(result, "SELECT device_id FROM silver_participants WHERE is_duplicate_key "
                          "AND quality_flags = 'PARTICIPANTS_KEY_DUPLICATE' "
-                         "ORDER BY source_row_number") == [(1,), (3,)]
+                         "ORDER BY device_id") == [("FBT-0001-AAAAAAAA",), ("FBT-0001-ZZZZZZZZ",)]
     assert query(result, "SELECT count(*) FROM gold_clinical_daily") == [(2 * DAYS,)]
     assert quality(result)[("PARTICIPANTS_KEY_DUPLICATE", "participants")][-3:-1] == (3, 2)
 
@@ -264,8 +265,8 @@ def test_invalid_score_is_withheld_per_field_and_raw_value_preserved(tmp_path):
     assert row["survey_valid_score_count"] == 3
     assert row["survey_present"] is True
     assert row["survey_quality_flags"] == "SURVEY_SCORE_INVALID"
-    assert query(result, "SELECT fatigue_score_raw, fatigue_score FROM silver_wellness_survey "
-                         "WHERE source_row_number = 2") == [("9", None)]
+    assert query(result, "SELECT fatigue_score FROM silver_wellness_survey "
+                         f"WHERE participant_id = 'P001' AND local_date = '{WINDOW[1]}'") == [(None,)]
     rejects = query(result, "SELECT raw_values, reason FROM quality_rejects "
                             "WHERE rule_id = 'SURVEY_SCORE_INVALID'")
     assert len(rejects) == 1 and rejects[0][1] == REASONS["SURVEY_SCORE_INVALID"]
@@ -322,16 +323,18 @@ def test_out_of_window_and_unparseable_dates_are_flagged_and_kept_out_of_gold(tm
     ]
     result = run(make_data(tmp_path, survey=survey), tmp_path / "out")
     assert query(result, "SELECT count(*) FROM gold_clinical_daily") == [(2 * DAYS,)]
-    assert query(result, "SELECT source_row_number, date_raw, local_date FROM silver_wellness_survey "
-                         "WHERE is_out_of_window ORDER BY source_row_number") == [
-        (6, "2026-01-07", date(2026, 1, 7)),
-        (7, "2026-01-11", date(2026, 1, 11)),
-        (8, "01/08/2026", None),
+    assert query(result, "SELECT local_date FROM silver_wellness_survey "
+                         "WHERE is_out_of_window ORDER BY local_date") == [
+        (date(2026, 1, 7),), (date(2026, 1, 11),),
     ]
-    assert quality(result)[("SURVEY_DATE_OUT_OF_WINDOW", "wellness_survey")][-3:-1] == (8, 3)
+    assert query(result, "SELECT count(*) FROM silver_wellness_survey WHERE local_date IS NULL "
+                         "AND NOT is_out_of_window AND quality_flags = 'SURVEY_DATE_UNPARSEABLE'") == [(1,)]
+    assert quality(result)[("SURVEY_DATE_OUT_OF_WINDOW", "wellness_survey")][-3:-1] == (8, 2)
+    assert quality(result)[("SURVEY_DATE_UNPARSEABLE", "wellness_survey")][-3:-1] == (8, 1)
     assert gold(result, "P001", WINDOW[0])["survey_row_count"] == 1
-    assert query(result, "SELECT count(*) FROM quality_rejects WHERE "
-                         "rule_id = 'SURVEY_DATE_OUT_OF_WINDOW'") == [(3,)]
+    assert query(result, "SELECT rule_id, count(*) FROM quality_rejects WHERE rule_id LIKE "
+                         "'SURVEY_DATE_%' GROUP BY rule_id ORDER BY rule_id") == [
+        ("SURVEY_DATE_OUT_OF_WINDOW", 2), ("SURVEY_DATE_UNPARSEABLE", 1)]
 
 
 def test_window_boundaries_are_inclusive(tmp_path):
@@ -354,6 +357,8 @@ def test_every_rule_reports_one_row_even_with_zero_failures(tmp_path):
     assert results[("SURVEY_DUPLICATE_PARTICIPANT_DAY", "wellness_survey")][:2] == ("withhold_field", "high")
     assert results[("SURVEY_DATE_OUT_OF_WINDOW", "wellness_survey")][:2] == ("exclude_from_output", "medium")
     assert results[("PARTICIPANTS_KEY_DUPLICATE", "participants")][:2] == ("flag", "high")
+    assert results[("PARTICIPANTS_INTEGER_INVALID", "participants")][:2] == ("withhold_field", "medium")
+    assert results[("SURVEY_DATE_UNPARSEABLE", "wellness_survey")][:2] == ("exclude_from_output", "medium")
     for key, value in results.items():
         expected_checked = 2 if key[1] == "participants" else 5
         assert value[-3:] == (expected_checked, 0, result.run_id)
@@ -387,8 +392,10 @@ def test_report_lists_run_id_and_one_row_per_rule(tmp_path):
         and not line.startswith("| ---")
     ]
     assert rows == [
+        ["PARTICIPANTS_INTEGER_INVALID", "participants", "withhold_field", "medium", "2", "0"],
         ["PARTICIPANTS_KEY_DUPLICATE", "participants", "flag", "high", "2", "0"],
         ["SURVEY_DATE_OUT_OF_WINDOW", "wellness_survey", "exclude_from_output", "medium", "6", "0"],
+        ["SURVEY_DATE_UNPARSEABLE", "wellness_survey", "exclude_from_output", "medium", "6", "0"],
         ["SURVEY_DUPLICATE_PARTICIPANT_DAY", "wellness_survey", "withhold_field", "high", "6", "0"],
         ["SURVEY_ORPHAN_PARTICIPANT", "wellness_survey", "exclude_from_output", "medium", "6", "1"],
         ["SURVEY_SCORE_INVALID", "wellness_survey", "withhold_field", "medium", "6", "0"],
@@ -577,8 +584,10 @@ def test_every_reject_carries_its_rules_reason_text(tmp_path):
         survey_row("P001", WINDOW[0].isoformat()),
         survey_row("P001", "2025-01-01"),
         survey_row("P002", WINDOW[2].isoformat(), ["9", "3", "5", "3"]),
+        survey_row("P001", "20260108"),
     ]
-    result = run(make_data(tmp_path, participants=[P001, P002, P002], survey=survey),
+    bad_age = ["P003", "FBT-0003-CCCCCCCC", "abc", "170", "female", "A", "180"]
+    result = run(make_data(tmp_path, participants=[P001, P002, P002, bad_age], survey=survey),
                  tmp_path / "out")
     rejects = query(result, "SELECT DISTINCT rule_id, reason FROM quality_rejects")
     assert dict(rejects) == REASONS
