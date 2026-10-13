@@ -83,7 +83,7 @@ def query(result, sql: str) -> list[tuple]:
 def snapshot(result) -> dict[str, list[tuple]]:
     tables = [
         "raw_manifest", "silver_participants", "silver_wellness_survey",
-        "quality_results", "quality_rejects", "gold_clinical_daily",
+        "silver_steps_minute", "quality_results", "quality_rejects", "gold_clinical_daily",
     ]
     return {name: query(result, f"SELECT * FROM {name} ORDER BY ALL") for name in tables}
 
@@ -156,6 +156,35 @@ SLEEP_HANDLING = {
     "SLEEP_ONSET_NOT_MINUTE_ALIGNED": ("flag", "medium"),
 }
 
+STEPS_REASONS = {
+    "STEPS_ORPHAN_PARTICIPANT": "steps participant_id is not enrolled in participants.csv",
+    "STEPS_PARTICIPANT_FOLDER_MISMATCH": "steps participant_id differs from its participant folder",
+    "STEPS_TIMESTAMP_UNPARSEABLE": "steps timestamp is missing or not a valid ISO 8601 timestamp",
+    "STEPS_TIMESTAMP_OUT_OF_WINDOW": "steps timestamp is outside the study window",
+    "STEPS_VALUE_INVALID": "steps is missing, not an integer, or outside the 32-bit integer range",
+    "STEPS_NEGATIVE": "steps is negative",
+    "STEPS_UNIT_CONVERTED": "steps_per_hour value converted to steps per minute",
+    "STEPS_UNIT_UNSUPPORTED": (
+        "steps _unit is not steps_per_hour or the hourly value is not divisible by 60"),
+    "STEPS_DUPLICATE_MINUTE_CONFLICT": "records for one participant-minute have different values",
+    "STEPS_DUPLICATE_MINUTE_EXACT": "records for one participant-minute have identical values",
+    "STEPS_TIMESTAMP_NOT_MINUTE_ALIGNED": "steps timestamp is not aligned to a whole minute",
+}
+
+STEPS_HANDLING = {
+    "STEPS_ORPHAN_PARTICIPANT": ("exclude_from_output", "medium"),
+    "STEPS_PARTICIPANT_FOLDER_MISMATCH": ("exclude_from_output", "medium"),
+    "STEPS_TIMESTAMP_UNPARSEABLE": ("exclude_from_output", "medium"),
+    "STEPS_TIMESTAMP_OUT_OF_WINDOW": ("exclude_from_output", "medium"),
+    "STEPS_VALUE_INVALID": ("withhold_field", "medium"),
+    "STEPS_NEGATIVE": ("withhold_field", "high"),
+    "STEPS_UNIT_CONVERTED": ("convert", "low"),
+    "STEPS_UNIT_UNSUPPORTED": ("withhold_field", "high"),
+    "STEPS_DUPLICATE_MINUTE_CONFLICT": ("withhold_field", "high"),
+    "STEPS_DUPLICATE_MINUTE_EXACT": ("flag", "medium"),
+    "STEPS_TIMESTAMP_NOT_MINUTE_ALIGNED": ("flag", "medium"),
+}
+
 RULES = [
     ("PARTICIPANTS_INTEGER_INVALID", "participants"),
     ("PARTICIPANTS_KEY_DUPLICATE", "participants"),
@@ -164,7 +193,7 @@ RULES = [
     ("SURVEY_DUPLICATE_PARTICIPANT_DAY", "wellness_survey"),
     ("SURVEY_ORPHAN_PARTICIPANT", "wellness_survey"),
     ("SURVEY_SCORE_INVALID", "wellness_survey"),
-] + [(rule, "sleep") for rule in SLEEP_REASONS]
+] + [(rule, "sleep") for rule in SLEEP_REASONS] + [(rule, "steps") for rule in STEPS_REASONS]
 
 
 # --- output locations, manifest and run id -------------------------------------------
@@ -278,6 +307,8 @@ def test_gold_values_and_presence_flags(tmp_path):
         "survey_row_count": 1, "survey_valid_score_count": 4, "survey_quality_flags": None,
         "total_sleep_min": None, "deep_sleep_pct": None, "sleep_efficiency_pct": None,
         "sleep_session_count": 0, "sleep_present": False, "sleep_quality_flags": None,
+        "total_steps": 0, "steps_valid_minute_count": 1, "minutes_rest_to_moderate": 1,
+        "minutes_burst": 0, "steps_present": True, "steps_quality_flags": None,
     }
     assert gold(result, "P002", WINDOW[2]) == {
         "participant_id": "P002", "local_date": WINDOW[2], "fatigue_score": None,
@@ -286,6 +317,8 @@ def test_gold_values_and_presence_flags(tmp_path):
         "survey_quality_flags": None,
         "total_sleep_min": None, "deep_sleep_pct": None, "sleep_efficiency_pct": None,
         "sleep_session_count": 0, "sleep_present": False, "sleep_quality_flags": None,
+        "total_steps": None, "steps_valid_minute_count": 0, "minutes_rest_to_moderate": 0,
+        "minutes_burst": 0, "steps_present": False, "steps_quality_flags": None,
     }
 
 
@@ -395,8 +428,10 @@ def test_every_rule_reports_one_row_even_with_zero_failures(tmp_path):
     assert results[("SURVEY_DATE_UNPARSEABLE", "wellness_survey")][:2] == ("exclude_from_output", "medium")
     for rule, handling in SLEEP_HANDLING.items():
         assert results[(rule, "sleep")][:2] == handling
+    for rule, handling in STEPS_HANDLING.items():
+        assert results[(rule, "steps")][:2] == handling
     for key, value in results.items():
-        expected_checked = {"participants": 2, "wellness_survey": 5, "sleep": 0}[key[1]]
+        expected_checked = {"participants": 2, "wellness_survey": 5, "sleep": 0, "steps": 1}[key[1]]
         assert value[-3:] == (expected_checked, 0, result.run_id)
     assert query(result, "SELECT count(*) FROM quality_rejects") == [(0,)]
 
@@ -442,6 +477,17 @@ def test_report_lists_run_id_and_one_row_per_rule(tmp_path):
         ["SLEEP_STAGE_DURATION_MISMATCH", "sleep", "flag", "medium", "0", "0"],
         ["SLEEP_STAGE_GAP_OR_OVERLAP", "sleep", "flag", "medium", "0", "0"],
         ["SLEEP_STAGE_INVALID", "sleep", "withhold_field", "medium", "0", "0"],
+        ["STEPS_DUPLICATE_MINUTE_CONFLICT", "steps", "withhold_field", "high", "1", "0"],
+        ["STEPS_DUPLICATE_MINUTE_EXACT", "steps", "flag", "medium", "1", "0"],
+        ["STEPS_NEGATIVE", "steps", "withhold_field", "high", "1", "0"],
+        ["STEPS_ORPHAN_PARTICIPANT", "steps", "exclude_from_output", "medium", "1", "0"],
+        ["STEPS_PARTICIPANT_FOLDER_MISMATCH", "steps", "exclude_from_output", "medium", "1", "0"],
+        ["STEPS_TIMESTAMP_NOT_MINUTE_ALIGNED", "steps", "flag", "medium", "1", "0"],
+        ["STEPS_TIMESTAMP_OUT_OF_WINDOW", "steps", "exclude_from_output", "medium", "1", "0"],
+        ["STEPS_TIMESTAMP_UNPARSEABLE", "steps", "exclude_from_output", "medium", "1", "0"],
+        ["STEPS_UNIT_CONVERTED", "steps", "convert", "low", "1", "0"],
+        ["STEPS_UNIT_UNSUPPORTED", "steps", "withhold_field", "high", "1", "0"],
+        ["STEPS_VALUE_INVALID", "steps", "withhold_field", "medium", "1", "0"],
         ["SURVEY_DATE_OUT_OF_WINDOW", "wellness_survey", "exclude_from_output", "medium", "6", "0"],
         ["SURVEY_DATE_UNPARSEABLE", "wellness_survey", "exclude_from_output", "medium", "6", "0"],
         ["SURVEY_DUPLICATE_PARTICIPANT_DAY", "wellness_survey", "withhold_field", "high", "6", "0"],
@@ -591,8 +637,8 @@ def test_pipeline_error_for_non_positive_study_days(tmp_path):
 def test_every_rule_carries_its_exact_reason_text(tmp_path):
     result = run(make_data(tmp_path), tmp_path / "out")
     rows = query(result, "SELECT rule_id, reason FROM quality_results")
-    assert dict(rows) == {**REASONS, **SLEEP_REASONS}
-    assert len(rows) == len(REASONS) + len(SLEEP_REASONS)
+    assert dict(rows) == {**REASONS, **SLEEP_REASONS, **STEPS_REASONS}
+    assert len(rows) == len(REASONS) + len(SLEEP_REASONS) + len(STEPS_REASONS)
 
 
 def test_unrecognised_files_are_catalogued_as_unclassified(tmp_path):
@@ -621,6 +667,9 @@ def test_gold_schema_types_and_primary_key(tmp_path):
         "total_sleep_min": "INTEGER", "deep_sleep_pct": "DOUBLE",
         "sleep_efficiency_pct": "DOUBLE", "sleep_session_count": "INTEGER",
         "sleep_present": "BOOLEAN", "sleep_quality_flags": "VARCHAR",
+        "total_steps": "BIGINT", "steps_valid_minute_count": "INTEGER",
+        "minutes_rest_to_moderate": "INTEGER", "minutes_burst": "INTEGER",
+        "steps_present": "BOOLEAN", "steps_quality_flags": "VARCHAR",
     }
     assert types == expected
     keys = query(result, "SELECT constraint_column_names FROM duckdb_constraints() "
