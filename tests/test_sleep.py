@@ -783,7 +783,7 @@ def test_pipeline_reports_sleep_rule_counts_rejects_and_reasons(tmp_path):
     assert by_rule["SLEEP_STAGE_INVALID"][3] == SLEEP_REASONS["SLEEP_STAGE_INVALID"]
     assert json.loads(by_rule["SLEEP_STAGE_INVALID"][4]) == bad
     assert by_rule["SLEEP_ORPHAN_PARTICIPANT"][2] == "wearable_events/P999/sleep.json:1"
-    assert query(result, "SELECT count(*) FROM quality_results") == [(30,)]
+    assert query(result, "SELECT count(*) FROM quality_results") == [(41,)]
 
 
 def test_sleep_rejects_carry_each_rules_exact_reason(tmp_path):
@@ -823,7 +823,7 @@ def test_remaining_sleep_rejects_carry_their_exact_reasons(tmp_path):
         assert rows[rule] == SLEEP_REASONS[rule]
 
 
-def test_report_lists_all_thirty_rules_in_rule_id_order(tmp_path):
+def test_report_lists_all_rules_in_rule_id_order(tmp_path):
     result = run(data_with(tmp_path), tmp_path / "out")
     text = result.report_path.read_text(encoding="utf-8")
     rows = [
@@ -831,7 +831,7 @@ def test_report_lists_all_thirty_rules_in_rule_id_order(tmp_path):
         for line in text.splitlines() if line.startswith("| ") and "rule_id" not in line
         and not line.startswith("| ---")
     ]
-    assert len(rows) == 30
+    assert len(rows) == 41
     assert [(r[0], r[1]) for r in rows] == sorted((r[0], r[1]) for r in rows)
     sleep = {r[0]: r for r in rows if r[1] == "sleep"}
     assert sleep["SLEEP_SPAN_OUTLIER"] == [

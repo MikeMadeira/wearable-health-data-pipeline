@@ -758,8 +758,10 @@ def test_gold_columns_are_the_survey_sleep_then_steps_columns_in_order(tmp_path)
                                         "ORDER BY ordinal_position")]
     assert cols[10:] == [
         "total_sleep_min", "deep_sleep_pct", "sleep_efficiency_pct", "sleep_session_count",
-        "sleep_present", "sleep_quality_flags", *GOLD_STEPS]
-    assert len(cols) == 22
+        "sleep_present", "sleep_quality_flags", *GOLD_STEPS,
+        "hr_mean_bpm", "hr_min_bpm", "hr_max_bpm", "hr_valid_minute_count", "hr_present",
+        "hr_quality_flags"]
+    assert len(cols) == 28
 
 
 def test_silver_steps_schema_and_grain(tmp_path):
@@ -996,7 +998,7 @@ def test_database_from_before_unit_conversion_gets_the_missing_columns_added(
     row = gold(second, "P001", DAY1)
     assert [row[c] for c in GOLD_STEPS] == [0, 1, 1, 0, True, None]
     assert row["fatigue_score"] == 3
-    assert len(row) == 22
+    assert len(row) == 28
     types = dict(query(second, "SELECT column_name, data_type FROM information_schema.columns "
                                "WHERE table_name = 'gold_clinical_daily'"))
     assert types["minutes_rest_to_moderate"] == types["minutes_burst"] == "INTEGER"

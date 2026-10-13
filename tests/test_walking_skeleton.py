@@ -185,6 +185,36 @@ STEPS_HANDLING = {
     "STEPS_TIMESTAMP_NOT_MINUTE_ALIGNED": ("flag", "medium"),
 }
 
+HR_REASONS = {
+    "HR_ORPHAN_PARTICIPANT": "heart rate participant_id is not enrolled in participants.csv",
+    "HR_PARTICIPANT_FOLDER_MISMATCH": "heart rate participant_id differs from its participant folder",
+    "HR_TIMESTAMP_UNPARSEABLE": (
+        "heart rate timestamp is missing or not a valid ISO 8601 timestamp"),
+    "HR_TIMESTAMP_OUT_OF_WINDOW": "heart rate timestamp is outside the study window",
+    "HR_VALUE_INVALID": (
+        "heart_rate_bpm is missing, not an integer, or outside the 32-bit integer range"),
+    "HR_VALUE_OUT_OF_RANGE": "heart_rate_bpm is outside the range 40 to 200",
+    "HR_STUCK_SENSOR_RUN": "heart_rate_bpm repeats for at least 60 consecutive minutes",
+    "HR_TIMESTAMP_CONVERTED": "heart rate timestamp with Z or an offset converted to UTC-05:00",
+    "HR_DUPLICATE_MINUTE_CONFLICT": "records for one participant-minute have different values",
+    "HR_DUPLICATE_MINUTE_EXACT": "records for one participant-minute have identical values",
+    "HR_TIMESTAMP_NOT_MINUTE_ALIGNED": "heart rate timestamp is not aligned to a whole minute",
+}
+
+HR_HANDLING = {
+    "HR_ORPHAN_PARTICIPANT": ("exclude_from_output", "medium"),
+    "HR_PARTICIPANT_FOLDER_MISMATCH": ("exclude_from_output", "medium"),
+    "HR_TIMESTAMP_UNPARSEABLE": ("exclude_from_output", "medium"),
+    "HR_TIMESTAMP_OUT_OF_WINDOW": ("exclude_from_output", "medium"),
+    "HR_VALUE_INVALID": ("withhold_field", "medium"),
+    "HR_VALUE_OUT_OF_RANGE": ("withhold_field", "high"),
+    "HR_STUCK_SENSOR_RUN": ("withhold_field", "medium"),
+    "HR_TIMESTAMP_CONVERTED": ("convert", "low"),
+    "HR_DUPLICATE_MINUTE_CONFLICT": ("withhold_field", "high"),
+    "HR_DUPLICATE_MINUTE_EXACT": ("flag", "medium"),
+    "HR_TIMESTAMP_NOT_MINUTE_ALIGNED": ("flag", "medium"),
+}
+
 RULES = [
     ("PARTICIPANTS_INTEGER_INVALID", "participants"),
     ("PARTICIPANTS_KEY_DUPLICATE", "participants"),
@@ -193,7 +223,8 @@ RULES = [
     ("SURVEY_DUPLICATE_PARTICIPANT_DAY", "wellness_survey"),
     ("SURVEY_ORPHAN_PARTICIPANT", "wellness_survey"),
     ("SURVEY_SCORE_INVALID", "wellness_survey"),
-] + [(rule, "sleep") for rule in SLEEP_REASONS] + [(rule, "steps") for rule in STEPS_REASONS]
+] + [(rule, "sleep") for rule in SLEEP_REASONS] + [(rule, "steps") for rule in STEPS_REASONS] + [
+    (rule, "heart_rate") for rule in HR_REASONS]
 
 
 # --- output locations, manifest and run id -------------------------------------------
@@ -309,6 +340,8 @@ def test_gold_values_and_presence_flags(tmp_path):
         "sleep_session_count": 0, "sleep_present": False, "sleep_quality_flags": None,
         "total_steps": 0, "steps_valid_minute_count": 1, "minutes_rest_to_moderate": 1,
         "minutes_burst": 0, "steps_present": True, "steps_quality_flags": None,
+        "hr_mean_bpm": None, "hr_min_bpm": None, "hr_max_bpm": None,
+        "hr_valid_minute_count": 0, "hr_present": False, "hr_quality_flags": None,
     }
     assert gold(result, "P002", WINDOW[2]) == {
         "participant_id": "P002", "local_date": WINDOW[2], "fatigue_score": None,
@@ -319,6 +352,8 @@ def test_gold_values_and_presence_flags(tmp_path):
         "sleep_session_count": 0, "sleep_present": False, "sleep_quality_flags": None,
         "total_steps": None, "steps_valid_minute_count": 0, "minutes_rest_to_moderate": 0,
         "minutes_burst": 0, "steps_present": False, "steps_quality_flags": None,
+        "hr_mean_bpm": None, "hr_min_bpm": None, "hr_max_bpm": None,
+        "hr_valid_minute_count": 0, "hr_present": False, "hr_quality_flags": None,
     }
 
 
@@ -430,8 +465,11 @@ def test_every_rule_reports_one_row_even_with_zero_failures(tmp_path):
         assert results[(rule, "sleep")][:2] == handling
     for rule, handling in STEPS_HANDLING.items():
         assert results[(rule, "steps")][:2] == handling
+    for rule, handling in HR_HANDLING.items():
+        assert results[(rule, "heart_rate")][:2] == handling
     for key, value in results.items():
-        expected_checked = {"participants": 2, "wellness_survey": 5, "sleep": 0, "steps": 1}[key[1]]
+        expected_checked = {"participants": 2, "wellness_survey": 5, "sleep": 0, "steps": 1,
+                            "heart_rate": 0}[key[1]]
         assert value[-3:] == (expected_checked, 0, result.run_id)
     assert query(result, "SELECT count(*) FROM quality_rejects") == [(0,)]
 
@@ -463,6 +501,17 @@ def test_report_lists_run_id_and_one_row_per_rule(tmp_path):
         and not line.startswith("| ---")
     ]
     assert rows == [
+        ["HR_DUPLICATE_MINUTE_CONFLICT", "heart_rate", "withhold_field", "high", "0", "0"],
+        ["HR_DUPLICATE_MINUTE_EXACT", "heart_rate", "flag", "medium", "0", "0"],
+        ["HR_ORPHAN_PARTICIPANT", "heart_rate", "exclude_from_output", "medium", "0", "0"],
+        ["HR_PARTICIPANT_FOLDER_MISMATCH", "heart_rate", "exclude_from_output", "medium", "0", "0"],
+        ["HR_STUCK_SENSOR_RUN", "heart_rate", "withhold_field", "medium", "0", "0"],
+        ["HR_TIMESTAMP_CONVERTED", "heart_rate", "convert", "low", "0", "0"],
+        ["HR_TIMESTAMP_NOT_MINUTE_ALIGNED", "heart_rate", "flag", "medium", "0", "0"],
+        ["HR_TIMESTAMP_OUT_OF_WINDOW", "heart_rate", "exclude_from_output", "medium", "0", "0"],
+        ["HR_TIMESTAMP_UNPARSEABLE", "heart_rate", "exclude_from_output", "medium", "0", "0"],
+        ["HR_VALUE_INVALID", "heart_rate", "withhold_field", "medium", "0", "0"],
+        ["HR_VALUE_OUT_OF_RANGE", "heart_rate", "withhold_field", "high", "0", "0"],
         ["PARTICIPANTS_INTEGER_INVALID", "participants", "withhold_field", "medium", "2", "0"],
         ["PARTICIPANTS_KEY_DUPLICATE", "participants", "flag", "high", "2", "0"],
         ["SLEEP_DATE_OUT_OF_WINDOW", "sleep", "exclude_from_output", "medium", "0", "0"],
@@ -637,8 +686,9 @@ def test_pipeline_error_for_non_positive_study_days(tmp_path):
 def test_every_rule_carries_its_exact_reason_text(tmp_path):
     result = run(make_data(tmp_path), tmp_path / "out")
     rows = query(result, "SELECT rule_id, reason FROM quality_results")
-    assert dict(rows) == {**REASONS, **SLEEP_REASONS, **STEPS_REASONS}
-    assert len(rows) == len(REASONS) + len(SLEEP_REASONS) + len(STEPS_REASONS)
+    assert dict(rows) == {**REASONS, **SLEEP_REASONS, **STEPS_REASONS, **HR_REASONS}
+    assert len(rows) == len(REASONS) + len(SLEEP_REASONS) + len(STEPS_REASONS) + len(HR_REASONS)
+    assert len(rows) == 41
 
 
 def test_unrecognised_files_are_catalogued_as_unclassified(tmp_path):
@@ -670,6 +720,9 @@ def test_gold_schema_types_and_primary_key(tmp_path):
         "total_steps": "BIGINT", "steps_valid_minute_count": "INTEGER",
         "minutes_rest_to_moderate": "INTEGER", "minutes_burst": "INTEGER",
         "steps_present": "BOOLEAN", "steps_quality_flags": "VARCHAR",
+        "hr_mean_bpm": "DOUBLE", "hr_min_bpm": "INTEGER", "hr_max_bpm": "INTEGER",
+        "hr_valid_minute_count": "INTEGER", "hr_present": "BOOLEAN",
+        "hr_quality_flags": "VARCHAR",
     }
     assert types == expected
     keys = query(result, "SELECT constraint_column_names FROM duckdb_constraints() "

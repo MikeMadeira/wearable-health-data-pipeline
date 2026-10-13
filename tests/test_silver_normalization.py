@@ -81,7 +81,7 @@ def test_quality_tables_and_gold_keep_their_shape(tmp_path):
     result = run(make_data(tmp_path), tmp_path / "out")
     assert set(columns(result, "quality_rejects")) == {
         "run_id", "rule_id", "source", "row_ref", "reason", "raw_values"}
-    assert len(columns(result, "gold_clinical_daily")) == 22
+    assert len(columns(result, "gold_clinical_daily")) == 28
 
 
 # --- participant integer conversion -------------------------------------------------------------
