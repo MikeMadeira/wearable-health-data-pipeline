@@ -5,9 +5,10 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ import duckdb
 
 from wearable_pipeline.normalize import parse_integer, parse_iso_date
 from wearable_pipeline.sleep import SLEEP_RULES, SleepLayer, build_sleep_layer
+from wearable_pipeline.steps import STEPS_RULES, StepsLayer, build_steps_layer
 
 DEFAULT_STUDY_START = date(2026, 1, 8)
 DEFAULT_STUDY_DAYS = 28
@@ -74,7 +76,7 @@ RULES = {
         "wellness_survey", "exclude_from_output", "medium",
         "date is outside the study window"),
 }
-RULES = {**RULES, **SLEEP_RULES}
+RULES = {**RULES, **SLEEP_RULES, **STEPS_RULES}
 INTEGER_FIELDS = ("age", "height_cm", "max_heart_rate")
 
 _FIXED_SOURCES = {
@@ -232,21 +234,75 @@ def _transform(
     }
 
 
-def _read_sleep_files(data_dir: Path, manifest: list[tuple[Any, ...]]) -> dict[str, list[Any]]:
+def _read_event_files(data_dir: Path, manifest: list[tuple[Any, ...]],
+                      kind: str) -> dict[str, list[Any]]:
     files: dict[str, list[Any]] = {}
     for relative, source, *_ in manifest:
-        if source != "sleep":
+        if source != kind:
             continue
         try:
             content = json.loads((data_dir / relative).read_text(encoding="utf-8"))
         except (OSError, ValueError, RecursionError) as error:
-            raise PipelineError(f"cannot read sleep file {relative}: {error}") from error
+            raise PipelineError(f"cannot read {kind} file {relative}: {error}") from error
         if not isinstance(content, list):
             raise PipelineError(f"{relative} must contain a JSON array")
         if not all(isinstance(item, dict) for item in content):
             raise PipelineError(f"{relative} must contain only JSON objects")
         files[relative] = content
     return files
+
+
+STEPS_GOLD_COLUMNS = (
+    ("total_steps", "BIGINT"), ("steps_valid_minute_count", "INTEGER"),
+    ("minutes_rest_to_moderate", "INTEGER"), ("minutes_burst", "INTEGER"),
+    ("steps_present", "BOOLEAN"), ("steps_quality_flags", "VARCHAR"),
+)
+GOLD_COLUMNS = (
+    ("participant_id", "VARCHAR"), ("local_date", "DATE"), ("fatigue_score", "INTEGER"),
+    ("stress_score", "INTEGER"), ("readiness_score", "INTEGER"),
+    ("sleep_quality_score", "INTEGER"), ("survey_present", "BOOLEAN"),
+    ("survey_row_count", "INTEGER"), ("survey_valid_score_count", "INTEGER"),
+    ("survey_quality_flags", "VARCHAR"),
+)
+SILVER_STEPS_DDL = (
+    "participant_id VARCHAR, local_date DATE, minute_ts TIMESTAMP, steps INTEGER, "
+    "steps_per_minute INTEGER, activity_level VARCHAR, unit VARCHAR, is_orphan BOOLEAN, "
+    "is_out_of_window BOOLEAN, is_duplicate_minute BOOLEAN, quality_flags VARCHAR")
+REJECTS_DDL = ("run_id VARCHAR, rule_id VARCHAR, source VARCHAR, row_ref VARCHAR, "
+               "reason VARCHAR, raw_values VARCHAR")
+
+
+def _csv_field(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return '"' + value.replace('"', '""') + '"'
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    return str(value)
+
+
+def _bulk_load(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple[Any, ...]]) -> None:
+    """Load rows with a temporary CSV and COPY; NULL is unquoted-empty, strings are quoted."""
+    if not rows:
+        return
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / f"{table}.csv"
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write("".join(",".join(map(_csv_field, row)) + "\n" for row in rows))
+        con.execute(
+            f"COPY {table} FROM '{path.as_posix()}' "
+            "(FORMAT CSV, HEADER false, NULLSTR '', ALLOW_QUOTED_NULLS false)")
+
+
+def _steps_gold(steps: StepsLayer, pid: str, day: date) -> tuple[Any, ...]:
+    entry = steps.daily.get((pid, day))
+    if entry is None:
+        return (None, 0, 0, 0, False, None)
+    return (entry.total_steps, entry.steps_valid_minute_count, entry.minutes_rest_to_moderate,
+            entry.minutes_burst, True, entry.steps_quality_flags)
 
 
 SLEEP_GOLD_COLUMNS = (
@@ -327,40 +383,33 @@ def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
                  "run_id VARCHAR, rule_id VARCHAR, source VARCHAR, handling VARCHAR, "
                  "severity VARCHAR, reason VARCHAR, checked_count BIGINT, failed_count BIGINT",
                  [(r[0], r[1], r[2], r[3], r[4], r[5], r[7], r[8]) for r in results])
-        _replace(con, "quality_rejects",
-                 "run_id VARCHAR, rule_id VARCHAR, source VARCHAR, row_ref VARCHAR, "
-                 "reason VARCHAR, raw_values VARCHAR", rejects)
+        con.execute("DROP TABLE IF EXISTS silver_steps_minute")
+        con.execute(f"CREATE TABLE silver_steps_minute ({SILVER_STEPS_DDL})")
+        _bulk_load(con, "silver_steps_minute", t["steps"].rows)
+        con.execute("DROP TABLE IF EXISTS quality_rejects")
+        con.execute(f"CREATE TABLE quality_rejects ({REJECTS_DDL})")
+        _bulk_load(con, "quality_rejects", rejects)
+        columns = GOLD_COLUMNS + SLEEP_GOLD_COLUMNS + STEPS_GOLD_COLUMNS
+        names = [name for name, _ in columns]
         con.execute(
             "CREATE TABLE IF NOT EXISTS gold_clinical_daily ("
-            "participant_id VARCHAR, local_date DATE, fatigue_score INTEGER, "
-            "stress_score INTEGER, readiness_score INTEGER, sleep_quality_score INTEGER, "
-            "survey_present BOOLEAN, survey_row_count INTEGER, "
-            "survey_valid_score_count INTEGER, survey_quality_flags VARCHAR, "
-            + ", ".join(f"{name} {kind}" for name, kind in SLEEP_GOLD_COLUMNS)
+            + ", ".join(f"{name} {kind}" for name, kind in columns)
             + ", PRIMARY KEY (participant_id, local_date))")
-        for name, kind in SLEEP_GOLD_COLUMNS:
+        for name, kind in columns:
             con.execute(
                 f"ALTER TABLE gold_clinical_daily ADD COLUMN IF NOT EXISTS {name} {kind}")
         con.execute(
             "CREATE OR REPLACE TEMP TABLE gold_stage AS "
             "SELECT * FROM gold_clinical_daily LIMIT 0")
         if t["gold"]:
-            marks = ",".join("?" * len(t["gold"][0]))
-            con.executemany(f"INSERT INTO gold_stage VALUES ({marks})", t["gold"])
+            marks = ",".join("?" * len(names))
+            con.executemany(
+                f"INSERT INTO gold_stage ({', '.join(names)}) VALUES ({marks})", t["gold"])
+        updates = ", ".join(f"{name} = s.{name}" for name in names[2:])
         con.execute(
             "MERGE INTO gold_clinical_daily AS g USING gold_stage AS s "
             "ON g.participant_id = s.participant_id AND g.local_date = s.local_date "
-            "WHEN MATCHED THEN UPDATE SET "
-            "fatigue_score = s.fatigue_score, stress_score = s.stress_score, "
-            "readiness_score = s.readiness_score, "
-            "sleep_quality_score = s.sleep_quality_score, survey_present = s.survey_present, "
-            "survey_row_count = s.survey_row_count, "
-            "survey_valid_score_count = s.survey_valid_score_count, "
-            "survey_quality_flags = s.survey_quality_flags, "
-            "total_sleep_min = s.total_sleep_min, deep_sleep_pct = s.deep_sleep_pct, "
-            "sleep_efficiency_pct = s.sleep_efficiency_pct, "
-            "sleep_session_count = s.sleep_session_count, sleep_present = s.sleep_present, "
-            "sleep_quality_flags = s.sleep_quality_flags "
+            f"WHEN MATCHED THEN UPDATE SET {updates} "
             "WHEN NOT MATCHED THEN INSERT BY NAME")
         con.execute("DROP TABLE gold_stage")
         con.execute("COMMIT")
@@ -393,7 +442,8 @@ def run_pipeline(
     participants = _read_required(data_dir, PARTICIPANTS_PATH, PARTICIPANT_COLUMNS)
     survey = _read_required(data_dir, SURVEY_PATH, SURVEY_COLUMNS)
     manifest = _build_manifest(data_dir)
-    sleep_files = _read_sleep_files(data_dir, manifest)
+    sleep_files = _read_event_files(data_dir, manifest, "sleep")
+    steps_files = _read_event_files(data_dir, manifest, "steps")
     run_id = _run_id(manifest)
     window = [study_start + timedelta(days=i) for i in range(study_days)]
 
@@ -404,8 +454,14 @@ def run_pipeline(
     t["rejects"] = t["rejects"] + sleep.rejects
     t["failed"] = t["failed"] + sleep.failed
     t["checked"]["sleep"] = sleep.checked
+    steps: StepsLayer = build_steps_layer(steps_files, enrolled, window)
+    t["steps"] = steps
+    t["rejects"] = t["rejects"] + steps.rejects
+    t["failed"] = t["failed"] + steps.failed
+    t["checked"]["steps"] = steps.checked
     t["gold"] = [
-        (*row, *_sleep_gold(sleep, row[0], row[1])) for row in t["gold"]
+        (*row, *_sleep_gold(sleep, row[0], row[1]), *_steps_gold(steps, row[0], row[1]))
+        for row in t["gold"]
     ]
     results = []
     for rule_id in sorted(RULES):

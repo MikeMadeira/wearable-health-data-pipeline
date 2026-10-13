@@ -54,8 +54,8 @@ the study window; `xs-06`) are observations that matter for day assignment, not 
 
 | ID | Source / check | Count / rate | Cell | Examples | Severity | Proposed handling (proposal) |
 |---|---|---|---|---|---|---|
-| M-01 | `steps.json` undocumented field `_unit` (single value `steps_per_hour`) | 120,963 records in 3 participants (P005 40,323; P033 40,320; P038 40,320); 84 participant-days; median steps with `_unit` about 60 times the unit-less median (P033 300, P038 420 vs 5 overall) | `shr-04`, `shr-11`, `xs-10` | P005, P033, P038 | High | quarantine until the unit semantics are confirmed; do not mix with per-minute counts silently |
-| M-02 | `steps` out of the documented 0-30 expectation | 95,902 records above 30 (4.8%), 56,389 above 200, 5,141 above 1,000 (26 distinct values), max 1,000,000; 2 records below 0 (min -1). Participants with any value > 200: P005, P029, P033, P037, P038 (P005/P033/P038 are the `_unit` participants; P029/P037 are not) | `shr-13` | P029, P037 (negative and extreme values) | High | flag-and-keep for burst values (dictionary allows bursts); quarantine negative/sentinel-like values |
+| M-01 | `steps.json` undocumented field `_unit` (single value `steps_per_hour`) | 120,963 records in 3 participants (P005 40,323; P033 40,320; P038 40,320); 84 participant-days; median steps with `_unit` about 60 times the unit-less median (P033 300, P038 420 vs 5 overall) | `shr-04`, `shr-11`, `xs-10` | P005, P033, P038 | High | convert (G1 decision updated 2026-10-13): per-minute value = `steps / 60` when divisible by 60, raw value and unit kept; see Section 7 |
+| M-02 | `steps` out of the documented 0-30 expectation | 95,902 records above 30 (4.8%), 56,389 above 200, 5,141 above 1,000 (26 distinct values), max 1,000,000; 2 records below 0 (min -1). Participants with any value > 200: P005, P029, P033, P037, P038 (P005/P033/P038 are the `_unit` participants; P029/P037 are not) | `shr-13` | P029, P037 (negative and extreme values) | High | keep burst values as the `burst` activity level (no flag; dictionary allows bursts); withhold negative/sentinel-like values |
 | M-03 | `heart_rate_bpm` outside 40-200 | 4 records (2 below 40, 2 above 200; observed min -10, max 999) in 2 participants | `shr-13` | P029, P037 | High | quarantine the records; exclude from daily aggregates |
 | M-04 | Heart-rate stuck-sensor runs (identical consecutive values, in range) | 2 runs of 180 min (runs >= 60 min: 2; runs >= 240 min: 0; any run >= 10 min: only these 2); 360 minutes = 0.018% of heart-rate records | `shr-15` | P003 from 2026-01-09T04:44; P042 from 2026-01-24T09:16 | Medium | flag-and-keep with a run-length flag; proposal: threshold of 60 identical minutes |
 | M-05 | `heart_rate.json` UTC `Z` timestamps | 2,880 records in 2 participants (P018 1,440 on a full day; P044 1,440); 600 of them change calendar date after UTC-05:00 conversion. Interpreted as UTC and shifted by -5 h, all 2,880 land in empty grid slots and 0 collide; interpreted as naive labels, 2,280 fill empty slots and 600 collide with existing records | `shr-08`, `xs-08` | P018 (gap 2026-01-25), P044 (gap 2026-01-17) | High | flag-and-keep with conversion to local; proposal pending decision on the timezone rule |
@@ -106,7 +106,7 @@ keys, all 28 study days present for every enrolled participant (`tab-04`, `tab-1
 | ID | Assumption | Evidence / status |
 |---|---|---|
 | A-01 | Naive timestamps are local UTC-05:00 (dictionary statement). | Cannot be proven from naive values. Supporting evidence: shifting the `Z` records by -5 h fills all 2,880 empty slots with 0 collisions (`shr-08`). |
-| A-02 | `_unit = steps_per_hour` means the value is a per-hour rate and would need conversion to per-minute counts. | Unverified; the scaling is consistent with about 60x (`shr-11`) but no conversion rule was tested. |
+| A-02 | `_unit = steps_per_hour` means the value is a per-hour rate and would need conversion to per-minute counts. | Supported but unconfirmed by the data provider. All 120,963 `_unit` records are non-negative multiples of 60 (the INC-004 real-data run found 0 unconvertible records). Converted medians per minute (from the raw files): P005 1, P033 5, P038 7, all `_unit` records 3 (mean 4.99), against a median of 5 (mean 7.35) for the 47 participants without `_unit` (P005's three unit-less records excluded). The values are plausible against the dictionary's 0-30 per minute expectation, which supports the hypothesis without proving the unit meaning. |
 | A-03 | `sleep_end` marks the start of the final awake tail (not the end of the last stage). | Consistent with 1,397 of 1,400 sessions (`slp-08`); the data dictionary does not state it. |
 | A-04 | The duplicated 2026-01-10 day and the missing 2026-01-08 day in P010, P019, P022, P025 are related (a mis-stamped day). | The values do not match exactly (conflicting values in 856 to 1,300 pairs), so equivalence is not shown (`shr-10`). |
 | A-05 | The 40-200 bpm and 0-30 steps/minute ranges from the dictionary are the right validity thresholds. | Dictionary-provided; the 0-30 steps bound is flagged as an "expected" rate with bursts allowed. |
@@ -152,8 +152,9 @@ superseded by the human decisions in Section 7; unselected options remain contex
    idempotent upsert on the daily key; (c) watermark per participant based on the last complete day. The data is a static 28-day
    batch with no arrival timestamps in any file; late-arriving or corrected rows cannot be identified from the data (M-07 conflicting
    duplicates are the closest evidence). Proposal: (b), keyed on the daily grain, so reruns are idempotent.
-10. **Further items to record** (UNRESOLVED): the handling of `_unit` records (M-01), whether `2.1.8` firmware is real (T-03), the
-    definition of `sleep_end` (A-03), and the rule for choosing between conflicting duplicate records (M-07).
+10. **Further items to record** (UNRESOLVED): whether `2.1.8` firmware is real (T-03), the
+    definition of `sleep_end` (A-03), and the rule for choosing between conflicting duplicate records (M-07). The handling of
+    `_unit` records (M-01) is decided in Section 7 (convert).
 
 ## 7. Human Decisions
 
@@ -178,10 +179,16 @@ all source records and raw values; handle defects at field/measure level so unre
 
 ### Field-level quality decisions
 
-- **Steps `_unit=steps_per_hour` (M-01):** preserve raw rows; flag and withhold the normalized per-minute step value and its
-   aggregate contribution until source semantics are confirmed. Do not assume division by 60.
-- **Step values (M-02):** negative values are invalid for normalized step metrics. Values above 30 are flagged as bursts, not
-   rejected. No positive upper cutoff is approved; decide only after semantic review. Apply after resolving `_unit`.
+- **Steps `_unit=steps_per_hour` (M-01), updated 2026-10-13 (INC-004):** convert. A record whose `_unit` is `steps_per_hour`
+   and whose `steps` is a non-negative integer divisible by 60 gets a normalized per-minute value `steps / 60`; the raw value and
+   the unit text are preserved unchanged. Totals, valid-minute counts and activity levels use the normalized value. A `_unit`
+   with another value, or an hourly value not divisible by 60, is withheld; a negative value stays invalid. The unit is decided
+   per record and never assumed from the participant. Evidence: all 120,963 records are multiples of 60, and the converted
+   medians are comparable to the unit-less participants (A-02). This supersedes the earlier decision to withhold these values
+   until the semantics were confirmed. The unit meaning is supported by the data but not confirmed by the data provider.
+- **Step values (M-02):** negative values are invalid for normalized step metrics. Values above 30 per minute (after `_unit`
+   conversion) are not rejected or flagged as defects: they are classified as the `burst` activity level and stay in the totals.
+   No positive upper cutoff is approved.
 - **Heart-rate range (M-03):** values outside inclusive 40-200 bpm are preserved raw, flagged, and excluded only from the
    normalized HR field and HR aggregates.
 - **Stuck HR (M-04):** provisionally flag runs of at least 60 identical consecutive minutes. Preserve raw readings but exclude
@@ -223,6 +230,7 @@ all source records and raw values; handle defects at field/measure level so unre
 ### Still open
 
 - Exact weekly statistical measures, chronotype output grain, and cohort metric list require consumer requirements and G2/G3 review.
-- Positive upper cutoff for steps; semantics of `_unit=steps_per_hour`; and whether firmware `2.1.8` is valid.
+- Positive upper cutoff for steps; confirmation of `_unit=steps_per_hour` by the data provider (conversion is applied
+  meanwhile); and whether firmware `2.1.8` is valid.
 - Minimum daily/weekly coverage thresholds and when an aggregate should be unavailable for insufficient coverage.
 - The 60-minute stuck-sensor threshold is provisional and should be revisited with validated device behavior or future data.
