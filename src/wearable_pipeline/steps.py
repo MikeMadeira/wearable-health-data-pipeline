@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any
+
+from wearable_pipeline.normalize import parse_local_timestamp
 
 # rule_id -> (source, handling, severity, reason)
 STEPS_RULES: dict[str, tuple[str, str, str, str]] = {
@@ -67,6 +70,76 @@ class StepsLayer:
     checked: int
     daily: dict[tuple[str, date], StepsDay]
 
+_INT_MIN, _INT_MAX = -(2**31), 2**31 - 1
+_REST_MAX = 30
+_ABSENT = "\0absent"
+
+
+def _flags(rule_ids: Collection[str]) -> str | None:
+    return ",".join(sorted(rule_ids)) if rule_ids else None
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _record(path: str, position: int, raw: Any, folder: str, enrolled: set[str],
+            window: set[date]) -> dict[str, Any]:
+    """Type one element and decide its record-level rules (duplicates are added later)."""
+    obj = raw if isinstance(raw, dict) else {}
+    given = obj.get("participant_id")
+    named = isinstance(given, str) and bool(given.strip())
+    pid = given if named else folder
+    ts = parse_local_timestamp(obj.get("timestamp"))
+    rules: set[str] = set()
+    orphan = pid not in enrolled
+    mismatch = named and given != folder
+    out_of_window = ts is not None and ts.date() not in window
+    if orphan:
+        rules.add("STEPS_ORPHAN_PARTICIPANT")
+    if mismatch:
+        rules.add("STEPS_PARTICIPANT_FOLDER_MISMATCH")
+    if ts is None:
+        rules.add("STEPS_TIMESTAMP_UNPARSEABLE")
+    if out_of_window:
+        rules.add("STEPS_TIMESTAMP_OUT_OF_WINDOW")
+    if ts is not None and (ts.second or ts.microsecond):
+        rules.add("STEPS_TIMESTAMP_NOT_MINUTE_ALIGNED")
+
+    value = obj.get("steps", _ABSENT)
+    has_unit = "_unit" in obj
+    unit_raw = obj.get("_unit")
+    unit_text = _json(unit_raw) if has_unit else _ABSENT
+    unit = (unit_raw if isinstance(unit_raw, str) else _json(unit_raw)) if has_unit else None
+    valid = (isinstance(value, int) and not isinstance(value, bool)
+             and _INT_MIN <= value <= _INT_MAX)
+    norm: int | None = None
+    if not valid:
+        rules.add("STEPS_VALUE_INVALID")
+    elif value < 0:
+        rules.add("STEPS_NEGATIVE")
+    elif not has_unit:
+        norm = value
+    elif unit_raw == "steps_per_hour" and isinstance(unit_raw, str) and value % 60 == 0:
+        norm = value // 60
+        rules.add("STEPS_UNIT_CONVERTED")
+    else:
+        rules.add("STEPS_UNIT_UNSUPPORTED")
+    if norm is not None:
+        signature: tuple[Any, ...] = ("value", norm, unit_text)
+    else:
+        signature = ("raw", _ABSENT if value is _ABSENT or "steps" not in obj else _json(value),
+                     unit_text)
+    return {
+        "path": path, "pos": position, "raw": raw, "pid": pid, "ts": ts,
+        "date": ts.date() if ts else None,
+        "slot": ts.replace(second=0, microsecond=0) if ts else None,
+        "steps": value if valid else None, "norm": norm, "unit": unit, "orphan": orphan,
+        "mismatch": mismatch, "oow": out_of_window, "dup": False, "rules": rules,
+        "signature": signature,
+        "in_scope": not orphan and not mismatch and ts is not None and not out_of_window,
+    }
+
 
 def build_steps_layer(
     files: Mapping[str, Sequence[Any]],
@@ -77,4 +150,59 @@ def build_steps_layer(
 
     ``files`` maps relative path to the parsed JSON array; see ``specs/INC-004.md``.
     """
-    raise NotImplementedError
+    enrolled_set, window_set = set(enrolled), set(window)
+    records: list[dict[str, Any]] = []
+    for path in sorted(files):
+        folder = path.split("/")[-2] if path.count("/") else ""
+        for position, raw in enumerate(files[path], start=1):
+            records.append(_record(path, position, raw, folder, enrolled_set, window_set))
+
+    groups: dict[tuple[str, datetime], list[dict[str, Any]]] = {}
+    for rec in records:
+        if rec["ts"] is not None and not rec["mismatch"]:
+            groups.setdefault((rec["pid"], rec["slot"]), []).append(rec)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        conflict = len({m["signature"] for m in members}) > 1
+        for m in members:
+            m["dup"] = True
+            m["rules"].add("STEPS_DUPLICATE_MINUTE_CONFLICT" if conflict
+                           else "STEPS_DUPLICATE_MINUTE_EXACT")
+            if conflict:
+                m["norm"] = None
+
+    rows: list[tuple[Any, ...]] = []
+    rejects: list[tuple[str, str, int, Any]] = []
+    failed: Counter[str] = Counter()
+    for rec in records:
+        norm = rec["norm"]
+        level = None if norm is None else (
+            "at_rest_to_moderate" if norm <= _REST_MAX else "burst")
+        rec["level"] = level
+        rows.append((rec["pid"], rec["date"], rec["ts"], rec["steps"], norm, level, rec["unit"],
+                     rec["orphan"], rec["oow"], rec["dup"], _flags(rec["rules"])))
+        for rule in sorted(rec["rules"]):
+            failed[rule] += 1
+            if rule != "STEPS_UNIT_CONVERTED":
+                rejects.append((rule, rec["path"], rec["pos"], rec["raw"]))
+
+    scoped: dict[tuple[str, date], dict[datetime, list[dict[str, Any]]]] = {}
+    for rec in records:
+        if rec["in_scope"]:
+            scoped.setdefault((rec["pid"], rec["date"]), {}).setdefault(
+                rec["slot"], []).append(rec)
+    daily: dict[tuple[str, date], StepsDay] = {}
+    for key, slots in scoped.items():
+        values: list[int] = []
+        levels: list[str] = []
+        rule_ids: set[str] = set()
+        for members in slots.values():
+            rule_ids.update(*(m["rules"] for m in members))
+            if members[0]["norm"] is not None:
+                values.append(members[0]["norm"])
+                levels.append(members[0]["level"])
+        daily[key] = StepsDay(
+            sum(values) if values else None, len(values),
+            levels.count("at_rest_to_moderate"), levels.count("burst"), _flags(rule_ids))
+    return StepsLayer(rows, rejects, failed, len(records), daily)
