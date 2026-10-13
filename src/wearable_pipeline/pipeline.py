@@ -15,6 +15,7 @@ from typing import Any
 import duckdb
 
 from wearable_pipeline.normalize import parse_integer, parse_iso_date
+from wearable_pipeline.heart_rate import HEART_RATE_RULES, HeartRateLayer, build_heart_rate_layer
 from wearable_pipeline.sleep import SLEEP_RULES, SleepLayer, build_sleep_layer
 from wearable_pipeline.steps import STEPS_RULES, StepsLayer, build_steps_layer
 
@@ -76,7 +77,7 @@ RULES = {
         "wellness_survey", "exclude_from_output", "medium",
         "date is outside the study window"),
 }
-RULES = {**RULES, **SLEEP_RULES, **STEPS_RULES}
+RULES = {**RULES, **SLEEP_RULES, **STEPS_RULES, **HEART_RATE_RULES}
 INTEGER_FIELDS = ("age", "height_cm", "max_heart_rate")
 
 _FIXED_SOURCES = {
@@ -257,6 +258,16 @@ STEPS_GOLD_COLUMNS = (
     ("minutes_rest_to_moderate", "INTEGER"), ("minutes_burst", "INTEGER"),
     ("steps_present", "BOOLEAN"), ("steps_quality_flags", "VARCHAR"),
 )
+HR_GOLD_COLUMNS = (
+    ("hr_mean_bpm", "DOUBLE"), ("hr_min_bpm", "INTEGER"), ("hr_max_bpm", "INTEGER"),
+    ("hr_valid_minute_count", "INTEGER"), ("hr_present", "BOOLEAN"),
+    ("hr_quality_flags", "VARCHAR"),
+)
+SILVER_HR_DDL = (
+    "participant_id VARCHAR, local_date DATE, minute_ts TIMESTAMP, raw_timestamp VARCHAR, "
+    "heart_rate_bpm INTEGER, heart_rate_bpm_normalized INTEGER, is_orphan BOOLEAN, "
+    "is_out_of_window BOOLEAN, is_duplicate_minute BOOLEAN, is_out_of_range BOOLEAN, "
+    "is_stuck_sensor BOOLEAN, is_timestamp_converted BOOLEAN, quality_flags VARCHAR")
 GOLD_COLUMNS = (
     ("participant_id", "VARCHAR"), ("local_date", "DATE"), ("fatigue_score", "INTEGER"),
     ("stress_score", "INTEGER"), ("readiness_score", "INTEGER"),
@@ -303,6 +314,14 @@ def _steps_gold(steps: StepsLayer, pid: str, day: date) -> tuple[Any, ...]:
         return (None, 0, 0, 0, False, None)
     return (entry.total_steps, entry.steps_valid_minute_count, entry.minutes_rest_to_moderate,
             entry.minutes_burst, True, entry.steps_quality_flags)
+
+
+def _hr_gold(hr: HeartRateLayer, pid: str, day: date) -> tuple[Any, ...]:
+    entry = hr.daily.get((pid, day))
+    if entry is None:
+        return (None, None, None, 0, False, None)
+    return (entry.hr_mean_bpm, entry.hr_min_bpm, entry.hr_max_bpm,
+            entry.hr_valid_minute_count, True, entry.hr_quality_flags)
 
 
 SLEEP_GOLD_COLUMNS = (
@@ -386,10 +405,13 @@ def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
         con.execute("DROP TABLE IF EXISTS silver_steps_minute")
         con.execute(f"CREATE TABLE silver_steps_minute ({SILVER_STEPS_DDL})")
         _bulk_load(con, "silver_steps_minute", t["steps"].rows)
+        con.execute("DROP TABLE IF EXISTS silver_heart_rate_minute")
+        con.execute(f"CREATE TABLE silver_heart_rate_minute ({SILVER_HR_DDL})")
+        _bulk_load(con, "silver_heart_rate_minute", t["heart_rate"].rows)
         con.execute("DROP TABLE IF EXISTS quality_rejects")
         con.execute(f"CREATE TABLE quality_rejects ({REJECTS_DDL})")
         _bulk_load(con, "quality_rejects", rejects)
-        columns = GOLD_COLUMNS + SLEEP_GOLD_COLUMNS + STEPS_GOLD_COLUMNS
+        columns = GOLD_COLUMNS + SLEEP_GOLD_COLUMNS + STEPS_GOLD_COLUMNS + HR_GOLD_COLUMNS
         names = [name for name, _ in columns]
         con.execute(
             "CREATE TABLE IF NOT EXISTS gold_clinical_daily ("
@@ -444,6 +466,7 @@ def run_pipeline(
     manifest = _build_manifest(data_dir)
     sleep_files = _read_event_files(data_dir, manifest, "sleep")
     steps_files = _read_event_files(data_dir, manifest, "steps")
+    hr_files = _read_event_files(data_dir, manifest, "heart_rate")
     run_id = _run_id(manifest)
     window = [study_start + timedelta(days=i) for i in range(study_days)]
 
@@ -459,8 +482,14 @@ def run_pipeline(
     t["rejects"] = t["rejects"] + steps.rejects
     t["failed"] = t["failed"] + steps.failed
     t["checked"]["steps"] = steps.checked
+    hr: HeartRateLayer = build_heart_rate_layer(hr_files, enrolled, window)
+    t["heart_rate"] = hr
+    t["rejects"] = t["rejects"] + hr.rejects
+    t["failed"] = t["failed"] + hr.failed
+    t["checked"]["heart_rate"] = hr.checked
     t["gold"] = [
-        (*row, *_sleep_gold(sleep, row[0], row[1]), *_steps_gold(steps, row[0], row[1]))
+        (*row, *_sleep_gold(sleep, row[0], row[1]), *_steps_gold(steps, row[0], row[1]),
+         *_hr_gold(hr, row[0], row[1]))
         for row in t["gold"]
     ]
     results = []
