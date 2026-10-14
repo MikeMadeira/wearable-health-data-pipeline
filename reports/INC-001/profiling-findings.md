@@ -224,6 +224,19 @@ all source records and raw values; handle defects at field/measure level so unre
     Jan 29-Feb 4. Store `week_id`, `period_start_date`, and `period_end_date`.
 7. **Weekly schema (G2):** distinct wide participant-week table keyed by (`participant_id`, `week_id`), with period boundaries,
     approved weekly measures, and valid-day/coverage fields. Exact statistical measures remain for G2 review.
+    Implemented 2026-10-14 (INC-007, decisions D1-D11 ratified by the human 2026-10-14): table `gold_biostat_weekly` with 29
+    columns, keyed by (`participant_id`, `week_id`), `week_id` 1 to 4 with the period bounds above (200 rows: 50 participants
+    x 4 weeks). It is derived from silver with the daily builder's rules, so quantities that overlap `gold_clinical_daily`
+    reconcile with it. Weekly heart rate is a minute-weighted mean, plus the minimum and maximum. Coverage columns
+    (`valid_days` and per-source valid days and minutes) are never NULL. `valid_days` counts days with a valid sleep, steps
+    or heart-rate value; survey days do not count. A measure is NULL when its own valid-day count is below
+    `MIN_VALID_DAYS = 4`; no imputation. Only whole weeks are emitted (a trailing partial week and windows under 7 days give
+    no row). A sleep session's stages are attributed by `stage_index` (D10): identical duplicate sessions count once, distinct
+    sessions on one day withhold the day. A direct `refresh` on a missing or wrong layout recreates the table (D11).
+    Incremental refresh plugs into `DerivedTable` and equals a full rebuild. Real data: 0 reconciliation mismatches on 10
+    checks, `valid_days` is 7 for all 200 rows, and no measure is NULL (steps and heart-rate valid days are 6 for 4
+    participant-weeks, 7 otherwise), so the threshold is exercised only by tests. One corrected record changes exactly one
+    weekly row (P001, week 2) in 3.3 s, against 109 s for a full rebuild.
 8. **Chronotype population (G3):** retain all enrolled participants in A/B cohorts; use metric-specific validity/coverage
     denominators and report cohort size and valid counts. Cohort output grain and metric list remain open for G3.
 9. **Daily freshness (G4):** incremental processing by affected participant-day with idempotent MERGE on
@@ -244,10 +257,12 @@ all source records and raw values; handle defects at field/measure level so unre
 
 ### Still open
 
-- Exact weekly statistical measures, chronotype output grain, and cohort metric list require consumer requirements and G2/G3 review.
+- Chronotype output grain and cohort metric list require consumer requirements and G3 review. The weekly measures chosen in
+  INC-007 were ratified at G2 (D1-D11, 2026-10-14); only the coverage threshold stays provisional pending real-data evidence.
 - Positive upper cutoff for steps; confirmation of `_unit=steps_per_hour` by the data provider (conversion is applied
   meanwhile); and whether firmware `2.1.8` is valid.
-- Minimum daily/weekly coverage thresholds and when an aggregate should be unavailable for insufficient coverage.
+- Minimum daily/weekly coverage thresholds and when an aggregate should be unavailable for insufficient coverage. The weekly
+  threshold (4 valid days, INC-007) is provisional and never triggers on the real data; the daily threshold is still open.
 - The 60-minute stuck-sensor threshold is provisional and should be revisited with validated device behavior or future data.
 - Daily freshness: incremental mode (INC-006) detects changed raw files only. The data has no arrival timestamps, so whether
   a change is a late arrival or a correction is a business definition that still has no source evidence.
