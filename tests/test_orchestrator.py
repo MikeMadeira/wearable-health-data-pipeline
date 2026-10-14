@@ -264,6 +264,30 @@ def test_environment_red_gate_accepts_only_missing_dependency_smoke_failure(
     assert "No module named 'duckdb'" in run_tests(tmp_path, "python", "environment-red")
 
 
+def test_environment_red_gate_accepts_quiet_pytest_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from scripts import orchestrate_increment
+
+    monkeypatch.setattr(
+        orchestrate_increment,
+        "run_command",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=["pytest"],
+            returncode=1,
+            stdout=(
+                "FAILED tests/test_container.py::test_environment_smoke - "
+                "ModuleNotFoundError: No module named 'yaml'\n"
+                "1 failed, 937 passed, 37 skipped in 300.12s (0:05:00)\n"
+            ),
+            stderr="",
+        ),
+    )
+    assert "No module named 'yaml'" in run_tests(tmp_path, "python", "environment-red")
+
+
 def test_environment_red_gate_rejects_unrelated_pytest_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
