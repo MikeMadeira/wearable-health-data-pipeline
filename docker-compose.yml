@@ -1,0 +1,7 @@
+services:
+  pipeline:
+    build: .
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    volumes:
+      - ./data:/data:ro
+      - ./output:/output

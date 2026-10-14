@@ -7,3 +7,6 @@ htmlcov
 output
 data
 *.py[cod]
+*.duckdb
+*.duckdb.wal
+.ipynb_checkpoints
