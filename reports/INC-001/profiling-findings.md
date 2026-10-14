@@ -239,6 +239,19 @@ all source records and raw values; handle defects at field/measure level so unre
     weekly row (P001, week 2) in 3.3 s, against 109 s for a full rebuild.
 8. **Chronotype population (G3):** retain all enrolled participants in A/B cohorts; use metric-specific validity/coverage
     denominators and report cohort size and valid counts. Cohort output grain and metric list remain open for G3.
+    Implemented 2026-10-14 (INC-008, decisions D1-D12 ratified by the human 2026-10-14): table `gold_chronotype_cohort`, one
+    row per enrolled participant (50 rows), keyed by `participant_id`, 13 columns. No participant is dropped. The cohort
+    (`chronotype_cohort`, A, B or NULL) is stored with `cohort_flag` (`CHRONOTYPE_MISSING`, `CHRONOTYPE_UNEXPECTED` or
+    `CHRONOTYPE_CONFLICT` when the cohort is NULL); matching is exact. Metrics cover the whole 28-day window: mean total
+    sleep, sleep efficiency, deep-sleep percentage, daily steps and heart rate, each with a never-NULL valid-day count. A mean
+    is NULL below `MIN_VALID_DAYS = 14` valid days. Heart rate is the mean of the daily means (each valid day weighs equally),
+    unlike the minute-weighted weekly mean. Derived from silver with the daily rules, no new quality rule, and incremental
+    refresh plugs into `DerivedTable` and equals a full rebuild. Real data: A 28 and B 22; cohort equals
+    `silver_participants.chronotype` on all 50 rows; 0 reconciliation mismatches with `gold_clinical_daily`; sleep valid days
+    are 28 for all, steps and heart-rate valid days are 27 for 4 participants and 28 for 46, so no mean is NULL and the
+    threshold is exercised only by tests. One corrected record changes exactly one cohort row (P001, steps mean) in 2.7 s,
+    against 78 s for a full rebuild. Cohort means (A / B): sleep 414.6 / 407.7 min, steps 10117 / 10635, heart rate
+    71.3 / 68.1 bpm (information only; the comparison query is INC-010).
 9. **Daily freshness (G4):** incremental processing by affected participant-day with idempotent MERGE on
     (`participant_id`, `local_date`). Detect changed source inputs with a deterministic file manifest/checksum or equivalent;
     source files do not provide arrival timestamps, so do not rely on watermarks alone.
@@ -257,12 +270,13 @@ all source records and raw values; handle defects at field/measure level so unre
 
 ### Still open
 
-- Chronotype output grain and cohort metric list require consumer requirements and G3 review. The weekly measures chosen in
+- The chronotype cohort grain and metrics were ratified at G3 (INC-008, D1-D12, 2026-10-14). The weekly measures chosen in
   INC-007 were ratified at G2 (D1-D11, 2026-10-14); only the coverage threshold stays provisional pending real-data evidence.
 - Positive upper cutoff for steps; confirmation of `_unit=steps_per_hour` by the data provider (conversion is applied
   meanwhile); and whether firmware `2.1.8` is valid.
 - Minimum daily/weekly coverage thresholds and when an aggregate should be unavailable for insufficient coverage. The weekly
-  threshold (4 valid days, INC-007) is provisional and never triggers on the real data; the daily threshold is still open.
+  threshold (4 valid days, INC-007) and the cohort threshold (14 valid days, INC-008) are provisional and never trigger on the
+  real data; the daily threshold is still open.
 - The 60-minute stuck-sensor threshold is provisional and should be revisited with validated device behavior or future data.
 - Daily freshness: incremental mode (INC-006) detects changed raw files only. The data has no arrival timestamps, so whether
   a change is a late arrival or a correction is a business definition that still has no source evidence.
