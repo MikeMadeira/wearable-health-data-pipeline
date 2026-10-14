@@ -12,7 +12,7 @@ Outputs:
 - specs/INC-006.md (Status: Draft)
 - src/wearable_pipeline/incremental.py (stub: results, `diff_manifests`, `changed_days`, `read_event_file`, `run_incremental`, `DerivedTable`, `DERIVED_TABLES = []`; function bodies are only `raise NotImplementedError`)
 - src/wearable_pipeline/compare.py (stub: `TableDiff`, `CompareResult`, `compare_outputs`, `format_comparison`)
-- tests/test_incremental.py (58 test functions), tests/test_compare.py (26); 126 collected cases with parametrization
+- tests/test_incremental.py (70 test functions), tests/test_compare.py (26); 162 new collected cases across both files with parametrization (corrected in Revision 3; earlier figures 58 and 126 were stale)
 - specs/INC-002.md (one edit: the CLI line now lists `--mode` and points to INC-006)
 - reports/INC-006/planner.md (this file). The directory `reports/INC-006/` was made with `mkdir` because the create tool needs an existing parent; no other directory was made.
 - No existing test was edited or weakened: none asserts the CLI surface or a full-rebuild-only behavior in a way that conflicts. The "full rebuild" sentences in specs/INC-002/003/004 describe full mode and stay true. `cli.py`, `pipeline.py` and `__init__.py` are not touched (the implementer wires them).
@@ -103,5 +103,28 @@ removed; `tests/test_compare.py`, the stubs, `intents/`, `data/`, `scripts/`, `.
 - `build_sleep_layer`, `build_steps_layer`, `build_heart_rate_layer` give the same totals when called per file as on all files (checked by the equivalence tests, not by reading `data/`).
 - The CLI keeps the default study window; the window parameters are reachable only through the Python functions.
 
+## Revision 3 (implementer blocker, Blocker-Type TESTS)
+Diagnosis verified against specs/INC-006.md (section 1: the CLI keeps the default window of 28 days
+and has no window flags; section 2: full mode stores the requested window and retains gold rows;
+sections 3 and 5: a different stored window takes the `window_changed` fallback) and the
+implementation: both tests built their database with `prepared()` (3-day window) and then ran the
+CLI (28-day window). So (a) the full CLI run kept 28 days of gold and stored window 28, which cannot
+equal a fresh 3-day rebuild, and (b) the incremental CLI run correctly printed `mode=full` with a
+`window_changed` fallback. Test defects, not spec or code defects. The spec is not ambiguous here.
+- Changed only in `tests/test_incremental.py`: two new helpers `prepared_cli` (baseline data built by
+  `main(["run", ...])`, default window) and `fresh_default_full` (`run_pipeline(data, out)` with the
+  default window); the two tests now use them, plus one `capsys.readouterr()` to discard the
+  preparation line in the second test. Assertions and intent are unchanged (default mode ignores an
+  existing database and equals a fresh full rebuild; CLI incremental prints `mode=incremental` then
+  `noop`). `prepared()`, `fresh_full()` and every other test are untouched; `src/`, `intents/`,
+  `specs/` and `data/` were not touched.
+- Stale counts corrected in Outputs: 70 test functions in test_incremental.py, 26 in test_compare.py;
+  162 new cases across both files (744 total minus 582 before); 4 of them passed in the red baseline
+  (586 passed in the Revision 2 baseline minus 582).
+- New baseline with the existing implementation: `python -m pytest -q`: 744 passed, 0 failed (about
+  171 s). Earlier red baseline (158 failed, 586 passed) is kept as history.
+
+Status: READY
+
 Next action:
-Route to the planning reviewer; after approval the human reviews the Draft spec and the red baseline. The implementer wires `pipeline.py`, `cli.py` and `__init__.py`, and implements `incremental.py` and `compare.py` without editing the tests.
+Route to the planning reviewer (or back to the implementer to re-run and set READY FOR REVIEW); after approval the human reviews the Draft spec and the red baseline. The implementer wires `pipeline.py`, `cli.py` and `__init__.py`, and implements `incremental.py` and `compare.py` without editing the tests.

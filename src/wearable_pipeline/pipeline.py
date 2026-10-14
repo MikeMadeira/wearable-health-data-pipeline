@@ -235,22 +235,22 @@ def _transform(
     }
 
 
+def _read_event_json(path: Path, relative: str, kind: str) -> list[Any]:
+    try:
+        content = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as error:
+        raise PipelineError(f"cannot read {kind} file {relative}: {error}") from error
+    if not isinstance(content, list):
+        raise PipelineError(f"{relative} must contain a JSON array")
+    if not all(isinstance(item, dict) for item in content):
+        raise PipelineError(f"{relative} must contain only JSON objects")
+    return content
+
+
 def _read_event_files(data_dir: Path, manifest: list[tuple[Any, ...]],
                       kind: str) -> dict[str, list[Any]]:
-    files: dict[str, list[Any]] = {}
-    for relative, source, *_ in manifest:
-        if source != kind:
-            continue
-        try:
-            content = json.loads((data_dir / relative).read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError) as error:
-            raise PipelineError(f"cannot read {kind} file {relative}: {error}") from error
-        if not isinstance(content, list):
-            raise PipelineError(f"{relative} must contain a JSON array")
-        if not all(isinstance(item, dict) for item in content):
-            raise PipelineError(f"{relative} must contain only JSON objects")
-        files[relative] = content
-    return files
+    return {relative: _read_event_json(data_dir / relative, relative, kind)
+            for relative, source, *_ in manifest if source == kind}
 
 
 STEPS_GOLD_COLUMNS = (
@@ -339,8 +339,7 @@ def _sleep_gold(sleep: SleepLayer, pid: str, day: date) -> tuple[Any, ...]:
             entry.sleep_session_count, entry.sleep_session_count > 0, entry.sleep_quality_flags)
 
 
-def _write_report(path: Path, run_id: str, manifest_count: int,
-                  results: list[tuple[Any, ...]]) -> None:
+def _report_text(run_id: str, manifest_count: int, results: list[tuple[Any, ...]]) -> str:
     lines = [
         "# Quality report", "", f"Run id: {run_id}", f"Manifest files: {manifest_count}", "",
         "| rule_id | source | handling | severity | checked | failed |",
@@ -348,9 +347,15 @@ def _write_report(path: Path, run_id: str, manifest_count: int,
     ]
     for r in results:
         lines.append(f"| {r[1]} | {r[2]} | {r[3]} | {r[4]} | {r[7]} | {r[8]} |")
+    return "\n".join(lines) + "\n"
+
+
+def _write_report(path: Path, run_id: str, manifest_count: int,
+                  results: list[tuple[Any, ...]]) -> None:
+    text = _report_text(run_id, manifest_count, results)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write("\n".join(lines) + "\n")
+        handle.write(text)
 
 
 def _replace(con: duckdb.DuckDBPyConnection, name: str, ddl: str,
@@ -362,45 +367,159 @@ def _replace(con: duckdb.DuckDBPyConnection, name: str, ddl: str,
         con.executemany(f"INSERT INTO {name} VALUES ({placeholders})", rows)
 
 
-def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
-             t: dict[str, Any], results: list[tuple[Any, ...]]) -> None:
-    rejects = [
+ALL_GOLD_COLUMNS = GOLD_COLUMNS + SLEEP_GOLD_COLUMNS + STEPS_GOLD_COLUMNS + HR_GOLD_COLUMNS
+SLEEP_SLICE = slice(len(GOLD_COLUMNS), len(GOLD_COLUMNS) + 6)
+STEPS_SLICE = slice(SLEEP_SLICE.stop, SLEEP_SLICE.stop + 6)
+HR_SLICE = slice(STEPS_SLICE.stop, STEPS_SLICE.stop + 6)
+
+TABLE_DDL = {
+    "raw_manifest": (
+        "relative_path VARCHAR, source VARCHAR, size_bytes BIGINT, sha256 VARCHAR, "
+        "record_count BIGINT"),
+    "silver_participants": (
+        "participant_id VARCHAR, device_id VARCHAR, "
+        "age INTEGER, height_cm INTEGER, gender VARCHAR, chronotype VARCHAR, "
+        "max_heart_rate INTEGER, is_duplicate_key BOOLEAN, quality_flags VARCHAR"),
+    "silver_wellness_survey": (
+        "participant_id VARCHAR, "
+        "local_date DATE, fatigue_score INTEGER, stress_score INTEGER, "
+        "readiness_score INTEGER, sleep_quality_score INTEGER, is_orphan BOOLEAN, "
+        "is_duplicate_key BOOLEAN, is_out_of_window BOOLEAN, quality_flags VARCHAR"),
+    "silver_sleep_sessions": (
+        "participant_id VARCHAR, local_date DATE, sleep_onset TIMESTAMP, "
+        "sleep_end TIMESTAMP, supplied_efficiency_pct DOUBLE, restlessness DOUBLE, "
+        "is_duplicate_key BOOLEAN, is_orphan BOOLEAN, is_out_of_window BOOLEAN, "
+        "quality_flags VARCHAR"),
+    "silver_sleep_stages": (
+        "participant_id VARCHAR, local_date DATE, stage_index INTEGER, "
+        "stage VARCHAR, start_time TIMESTAMP, end_time TIMESTAMP, "
+        "duration_min INTEGER, derived_duration_min DOUBLE, quality_flags VARCHAR"),
+    "quality_results": (
+        "run_id VARCHAR, rule_id VARCHAR, source VARCHAR, handling VARCHAR, "
+        "severity VARCHAR, reason VARCHAR, checked_count BIGINT, failed_count BIGINT"),
+    "silver_steps_minute": SILVER_STEPS_DDL,
+    "silver_heart_rate_minute": SILVER_HR_DDL,
+    "quality_rejects": REJECTS_DDL,
+    "quality_file_counts": (
+        "relative_path VARCHAR, source VARCHAR, rule_id VARCHAR, checked_count BIGINT, "
+        "failed_count BIGINT"),
+    "silver_file_owners": "relative_path VARCHAR, silver_table VARCHAR, participant_id VARCHAR",
+    "run_window": "study_start DATE, study_days INTEGER",
+}
+# silver tables written for each event source (specs/INC-006.md section 2)
+SOURCE_TABLES = {
+    "sleep": ("silver_sleep_sessions", "silver_sleep_stages"),
+    "steps": ("silver_steps_minute",),
+    "heart_rate": ("silver_heart_rate_minute",),
+}
+
+
+def _file_stats(kind: str, files: dict[str, list[Any]],
+                layer: Any) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    """Per-file ``quality_file_counts`` and ``silver_file_owners`` rows of one event source.
+
+    Every record yields exactly one session/minute row, in sorted-path then position order, and
+    each row's last column lists all rule ids of the record.
+    """
+    rows = layer.sessions if kind == "sleep" else layer.rows
+    rules = sorted(rule for rule, spec in RULES.items() if spec[0] == kind)
+    tables = SOURCE_TABLES[kind]
+    counts: list[tuple[Any, ...]] = []
+    owners: list[tuple[Any, ...]] = []
+    offset = 0
+    for path in sorted(files):
+        records = files[path]
+        chunk = rows[offset:offset + len(records)]
+        offset += len(records)
+        failed: Counter[str] = Counter()
+        for row in chunk:
+            if row[-1]:
+                failed.update(row[-1].split(","))
+        counts.extend((path, kind, rule, len(records), failed[rule]) for rule in rules)
+        owners.extend((path, tables[0], pid) for pid in sorted({row[0] for row in chunk}))
+        if kind == "sleep":
+            staged = {row[0] for row, record in zip(chunk, records)
+                      if isinstance(record, dict) and isinstance(record.get("stages"), list)
+                      and record["stages"]}
+            owners.extend((path, tables[1], pid) for pid in sorted(staged))
+    return counts, owners
+
+
+def _ensure_gold(con: duckdb.DuckDBPyConnection) -> None:
+    """Create ``gold_clinical_daily`` or bring an older layout to the current columns."""
+    ddl = ("CREATE TABLE gold_clinical_daily ("
+           + ", ".join(f"{name} {kind}" for name, kind in ALL_GOLD_COLUMNS)
+           + ", PRIMARY KEY (participant_id, local_date))")
+    exists = con.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = 'main' AND table_name = 'gold_clinical_daily'").fetchone()[0]
+    if not exists:
+        con.execute(ddl)
+        return
+    current = [(row[0], row[1]) for row in con.execute("DESCRIBE gold_clinical_daily").fetchall()]
+    if current == list(ALL_GOLD_COLUMNS):
+        return
+    present = {name for name, _ in current}
+    common = ", ".join(name for name, _ in ALL_GOLD_COLUMNS if name in present)
+    con.execute("CREATE TEMP TABLE gold_previous AS SELECT * FROM gold_clinical_daily")
+    con.execute("DROP TABLE gold_clinical_daily")
+    con.execute(ddl)
+    if common:
+        con.execute(f"INSERT INTO gold_clinical_daily ({common}) SELECT {common} FROM gold_previous")
+    con.execute("DROP TABLE gold_previous")
+
+
+def _merge_gold(con: duckdb.DuckDBPyConnection, rows: list[tuple[Any, ...]],
+                prune: bool = False) -> None:
+    """MERGE full gold rows on (participant_id, local_date); optionally prune other keys."""
+    names = [name for name, _ in ALL_GOLD_COLUMNS]
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE gold_stage AS SELECT * FROM gold_clinical_daily LIMIT 0")
+    if rows:
+        marks = ",".join("?" * len(names))
+        con.executemany(f"INSERT INTO gold_stage ({', '.join(names)}) VALUES ({marks})", rows)
+    updates = ", ".join(f"{name} = s.{name}" for name in names[2:])
+    con.execute(
+        "MERGE INTO gold_clinical_daily AS g USING gold_stage AS s "
+        "ON g.participant_id = s.participant_id AND g.local_date = s.local_date "
+        f"WHEN MATCHED THEN UPDATE SET {updates} "
+        "WHEN NOT MATCHED THEN INSERT BY NAME")
+    if prune:
+        con.execute(
+            "DELETE FROM gold_clinical_daily WHERE (participant_id, local_date) NOT IN "
+            "(SELECT participant_id, local_date FROM gold_stage)")
+    con.execute("DROP TABLE gold_stage")
+
+
+def _reject_rows(run_id: str, rejects: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+    return [
         (run_id, rule, RULES[rule][0], f"{path}:{n}", RULES[rule][3],
          json.dumps(raw, ensure_ascii=False))
-        for rule, path, n, raw in t["rejects"]
+        for rule, path, n, raw in rejects
     ]
+
+
+def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
+             t: dict[str, Any], results: list[tuple[Any, ...]],
+             side: dict[str, list[tuple[Any, ...]]], window: tuple[date, int],
+             prune: bool = False) -> None:
+    from wearable_pipeline import incremental
+
+    rejects = _reject_rows(run_id, t["rejects"])
     rejects.sort()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(db_path))
+    con = None
     try:
+        con = duckdb.connect(str(db_path))
         con.execute("BEGIN TRANSACTION")
-        _replace(con, "raw_manifest",
-                 "relative_path VARCHAR, source VARCHAR, size_bytes BIGINT, sha256 VARCHAR, "
-                 "record_count BIGINT", manifest)
-        _replace(con, "silver_participants",
-                 "participant_id VARCHAR, device_id VARCHAR, "
-                 "age INTEGER, height_cm INTEGER, gender VARCHAR, chronotype VARCHAR, "
-                 "max_heart_rate INTEGER, is_duplicate_key BOOLEAN, quality_flags VARCHAR",
-                 t["silver_p"])
-        _replace(con, "silver_wellness_survey",
-                 "participant_id VARCHAR, "
-                 "local_date DATE, fatigue_score INTEGER, stress_score INTEGER, "
-                 "readiness_score INTEGER, sleep_quality_score INTEGER, is_orphan BOOLEAN, "
-                 "is_duplicate_key BOOLEAN, is_out_of_window BOOLEAN, quality_flags VARCHAR",
+        _replace(con, "raw_manifest", TABLE_DDL["raw_manifest"], manifest)
+        _replace(con, "silver_participants", TABLE_DDL["silver_participants"], t["silver_p"])
+        _replace(con, "silver_wellness_survey", TABLE_DDL["silver_wellness_survey"],
                  t["silver_s"])
-        _replace(con, "silver_sleep_sessions",
-                 "participant_id VARCHAR, local_date DATE, sleep_onset TIMESTAMP, "
-                 "sleep_end TIMESTAMP, supplied_efficiency_pct DOUBLE, restlessness DOUBLE, "
-                 "is_duplicate_key BOOLEAN, is_orphan BOOLEAN, is_out_of_window BOOLEAN, "
-                 "quality_flags VARCHAR", t["sleep"].sessions)
-        _replace(con, "silver_sleep_stages",
-                 "participant_id VARCHAR, local_date DATE, stage_index INTEGER, "
-                 "stage VARCHAR, start_time TIMESTAMP, end_time TIMESTAMP, "
-                 "duration_min INTEGER, derived_duration_min DOUBLE, quality_flags VARCHAR",
-                 t["sleep"].stages)
-        _replace(con, "quality_results",
-                 "run_id VARCHAR, rule_id VARCHAR, source VARCHAR, handling VARCHAR, "
-                 "severity VARCHAR, reason VARCHAR, checked_count BIGINT, failed_count BIGINT",
+        _replace(con, "silver_sleep_sessions", TABLE_DDL["silver_sleep_sessions"],
+                 t["sleep"].sessions)
+        _replace(con, "silver_sleep_stages", TABLE_DDL["silver_sleep_stages"], t["sleep"].stages)
+        _replace(con, "quality_results", TABLE_DDL["quality_results"],
                  [(r[0], r[1], r[2], r[3], r[4], r[5], r[7], r[8]) for r in results])
         con.execute("DROP TABLE IF EXISTS silver_steps_minute")
         con.execute(f"CREATE TABLE silver_steps_minute ({SILVER_STEPS_DDL})")
@@ -411,38 +530,26 @@ def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
         con.execute("DROP TABLE IF EXISTS quality_rejects")
         con.execute(f"CREATE TABLE quality_rejects ({REJECTS_DDL})")
         _bulk_load(con, "quality_rejects", rejects)
-        columns = GOLD_COLUMNS + SLEEP_GOLD_COLUMNS + STEPS_GOLD_COLUMNS + HR_GOLD_COLUMNS
-        names = [name for name, _ in columns]
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS gold_clinical_daily ("
-            + ", ".join(f"{name} {kind}" for name, kind in columns)
-            + ", PRIMARY KEY (participant_id, local_date))")
-        for name, kind in columns:
-            con.execute(
-                f"ALTER TABLE gold_clinical_daily ADD COLUMN IF NOT EXISTS {name} {kind}")
-        con.execute(
-            "CREATE OR REPLACE TEMP TABLE gold_stage AS "
-            "SELECT * FROM gold_clinical_daily LIMIT 0")
-        if t["gold"]:
-            marks = ",".join("?" * len(names))
-            con.executemany(
-                f"INSERT INTO gold_stage ({', '.join(names)}) VALUES ({marks})", t["gold"])
-        updates = ", ".join(f"{name} = s.{name}" for name in names[2:])
-        con.execute(
-            "MERGE INTO gold_clinical_daily AS g USING gold_stage AS s "
-            "ON g.participant_id = s.participant_id AND g.local_date = s.local_date "
-            f"WHEN MATCHED THEN UPDATE SET {updates} "
-            "WHEN NOT MATCHED THEN INSERT BY NAME")
-        con.execute("DROP TABLE gold_stage")
+        _replace(con, "quality_file_counts", TABLE_DDL["quality_file_counts"], side["counts"])
+        _replace(con, "silver_file_owners", TABLE_DDL["silver_file_owners"], side["owners"])
+        _replace(con, "run_window", TABLE_DDL["run_window"], [window])
+        _ensure_gold(con)
+        _merge_gold(con, t["gold"], prune)
+        for table in incremental.DERIVED_TABLES:
+            table.refresh(con, None)
         con.execute("COMMIT")
-    except duckdb.Error as error:
-        try:
-            con.execute("ROLLBACK")
-        except duckdb.Error:
-            pass
-        raise PipelineError(f"database write failed: {error}") from error
+    except Exception as error:
+        if con is not None:
+            try:
+                con.execute("ROLLBACK")
+            except duckdb.Error:
+                pass
+        if isinstance(error, duckdb.Error):
+            raise PipelineError(f"database write failed: {error}") from error
+        raise
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
 
 def run_pipeline(
@@ -456,13 +563,28 @@ def run_pipeline(
 
     Raises PipelineError before touching any table when inputs violate the contract.
     """
-    data_dir, output_dir = Path(data_dir), Path(output_dir)
+    return _run_full(Path(data_dir), Path(output_dir), study_start, study_days)[0]
+
+
+def _read_inputs(data_dir: Path, study_days: int) -> tuple[list[dict[str, str]],
+                                                           list[dict[str, str]]]:
+    """Validate the arguments and read the two required CSV inputs."""
     if study_days < 1:
         raise PipelineError("study_days must be at least 1")
     if not data_dir.is_dir():
         raise PipelineError(f"data directory not found: {data_dir}")
     participants = _read_required(data_dir, PARTICIPANTS_PATH, PARTICIPANT_COLUMNS)
     survey = _read_required(data_dir, SURVEY_PATH, SURVEY_COLUMNS)
+    return participants, survey
+
+
+def _run_full(data_dir: Path, output_dir: Path, study_start: date, study_days: int,
+              prune: bool = False) -> tuple[RunResult, int]:
+    """Full rebuild; returns the result and the number of staged gold rows.
+
+    ``prune`` (incremental shared-input path only) deletes gold rows outside the staged set.
+    """
+    participants, survey = _read_inputs(data_dir, study_days)
     manifest = _build_manifest(data_dir)
     sleep_files = _read_event_files(data_dir, manifest, "sleep")
     steps_files = _read_event_files(data_dir, manifest, "steps")
@@ -499,8 +621,16 @@ def run_pipeline(
                         None, t["checked"][source], t["failed"][rule_id]))
     results.sort(key=lambda r: (r[1], r[2]))
 
+    side: dict[str, list[tuple[Any, ...]]] = {"counts": [], "owners": []}
+    for kind, files, layer in (("sleep", sleep_files, sleep), ("steps", steps_files, steps),
+                               ("heart_rate", hr_files, hr)):
+        counts, owners = _file_stats(kind, files, layer)
+        side["counts"].extend(counts)
+        side["owners"].extend(owners)
+
     database_path = output_dir / "wearable.duckdb"
     report_path = output_dir / "quality" / "report.md"
-    _persist(database_path, run_id, manifest, t, results)
+    _persist(database_path, run_id, manifest, t, results, side, (study_start, study_days), prune)
     _write_report(report_path, run_id, len(manifest), results)
-    return RunResult(run_id=run_id, database_path=database_path, report_path=report_path)
+    return (RunResult(run_id=run_id, database_path=database_path, report_path=report_path),
+            len(t["gold"]))

@@ -1196,6 +1196,21 @@ def cli_args(data: Path, out: Path, *extra: str) -> list[str]:
     return ["run", "--data-dir", str(data), "--output-dir", str(out), *extra]
 
 
+def prepared_cli(tmp_path: Path) -> tuple[Path, Path]:
+    """Baseline data fully built through the CLI, i.e. with the CLI's default 28-day window."""
+    data = baseline_data(tmp_path)
+    out = tmp_path / "out"
+    assert main(cli_args(data, out)) == 0
+    return data, out
+
+
+def fresh_default_full(data: Path, tmp_path: Path) -> Path:
+    """A full rebuild with the default window (what the CLI uses) into a new directory."""
+    out = tmp_path / "fresh-default"
+    run_pipeline(data, out)
+    return out
+
+
 def test_run_pipeline_and_run_incremental_keep_the_documented_signatures():
     assert list(inspect.signature(run_pipeline).parameters) == [
         "data_dir", "output_dir", "study_start", "study_days"]
@@ -1222,10 +1237,10 @@ def test_explicit_full_mode_equals_the_default(tmp_path, capsys):
 
 
 def test_default_mode_ignores_an_existing_database_like_before(tmp_path):
-    data, out = prepared(tmp_path)
+    data, out = prepared_cli(tmp_path)
     m_corrected(data)
     assert main(cli_args(data, out)) == 0
-    assert state(out) == state(fresh_full(data, tmp_path))
+    assert state(out) == state(fresh_default_full(data, tmp_path))
 
 
 def test_unknown_mode_is_rejected_by_the_argument_parser(tmp_path):
@@ -1244,12 +1259,13 @@ def test_cli_incremental_without_a_database_says_it_fell_back(tmp_path, capsys):
 
 
 def test_cli_incremental_run_and_noop_report_their_mode(tmp_path, capsys):
-    data, out = prepared(tmp_path)
+    data, out = prepared_cli(tmp_path)
+    capsys.readouterr()
     m_corrected(data)
     assert main(cli_args(data, out, "--mode", "incremental")) == 0
     first = capsys.readouterr().out.splitlines()
     assert len(first) == 1 and LINE.match(first[0]).group(5) == "incremental"
-    assert state(out) == state(fresh_full(data, tmp_path))
+    assert state(out) == state(fresh_default_full(data, tmp_path))
     assert main(cli_args(data, out, "--mode", "incremental")) == 0
     second = capsys.readouterr().out.splitlines()
     assert len(second) == 1 and LINE.match(second[0]).group(5) == "noop"

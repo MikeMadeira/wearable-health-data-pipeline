@@ -229,6 +229,16 @@ all source records and raw values; handle defects at field/measure level so unre
 9. **Daily freshness (G4):** incremental processing by affected participant-day with idempotent MERGE on
     (`participant_id`, `local_date`). Detect changed source inputs with a deterministic file manifest/checksum or equivalent;
     source files do not provide arrival timestamps, so do not rely on watermarks alone.
+    Implemented 2026-10-13 (INC-006): the current `raw_manifest` (path plus SHA-256) is compared with the one stored in the
+    database. Only new or changed event files are re-parsed. Gold is recomputed only for participant-days whose silver rows
+    changed. A removed file or record counts as a change. A change to a shared input (participants, survey, device metadata)
+    or to the study window (stored in the `run_window` side table) rebuilds everything it affects. A participant whose records
+    sit in two files (a sleep duplicate across files, or a folder mismatch) forces a re-parse of that whole source. A missing,
+    old-schema or manifest-less database falls back to one full rebuild. Incremental output, `run_id` and report equal a full
+    rebuild's; a failed run leaves the previous output unchanged. Real data (copies of `data/`): a no-op rerun takes 0.4 s,
+    and one corrected record changes exactly one gold row (P001, 2026-01-20) in 2.7 s, against 74 to 85 s for a full rebuild.
+    This detects changed files, not late arrival: the data still has no arrival timestamps, so a late or corrected record
+    cannot be told apart from any other file change.
 10. **Local storage (G4):** native DuckDB tables for local persisted outputs, using its transaction and MERGE semantics.
       Iceberg remains a proposed cloud table format only.
 
@@ -239,3 +249,5 @@ all source records and raw values; handle defects at field/measure level so unre
   meanwhile); and whether firmware `2.1.8` is valid.
 - Minimum daily/weekly coverage thresholds and when an aggregate should be unavailable for insufficient coverage.
 - The 60-minute stuck-sensor threshold is provisional and should be revisited with validated device behavior or future data.
+- Daily freshness: incremental mode (INC-006) detects changed raw files only. The data has no arrival timestamps, so whether
+  a change is a late arrival or a correction is a business definition that still has no source evidence.
