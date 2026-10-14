@@ -157,7 +157,8 @@ def assert_rows(actual: list[dict[str, Any]], expected: list[dict[str, Any]]) ->
                 assert got[key] == pytest.approx(value, abs=1e-9), key
             else:
                 assert got[key] == value, key
-                assert type(got[key]) is int, key  # counts and day totals are integers
+                if isinstance(value, int) and not isinstance(value, bool):
+                    assert type(got[key]) is int, key  # counts and day totals are integers
 
 
 def run_one(db: Path, sql: Path) -> QueryResult:

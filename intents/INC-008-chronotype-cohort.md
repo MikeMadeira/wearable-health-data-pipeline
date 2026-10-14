@@ -81,7 +81,7 @@ documentation are separate increments (INC-010 and INC-009).
   updated by this increment. No other test is weakened.
 - Out of scope:
   - the A versus B comparison query or any cohort-level summary table (INC-010);
-  - `gold_participant_devices` (already produced since INC-002);
+  - `gold_participant_devices` (not implemented: out of scope for INIT-001);
   - the container and the documentation (INC-009, INC-010);
   - statistical testing, modeling and machine learning;
   - new timing metrics, new silver tables and new quality rules;

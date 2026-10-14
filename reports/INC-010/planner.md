@@ -37,3 +37,15 @@ Findings:
 
 Next action:
 Decisions P1-P12 RATIFIED 2026-10-14 by the human, unchanged (full text in specs/INC-010.md section 9). Human rulings: `gold_participant_devices` stays not implemented (P8; the README must not say it was delivered in INC-002, which supersedes the contrary line in the intent); the exact `compare` command is the form in specs/INC-009.md (P10); everything else accepted as planned. Planning review: APPROVED (reports/INC-010/planning-review.md). Route to the implementer after the planning commit; it creates `queries/*.sql`, the runner bodies and the README without editing tests.
+
+## Repair 1
+
+Status: READY
+
+Recovery report: `reports/INC-010/implementer.md` (BLOCKED, Blocker-Type TESTS).
+
+Defect: the `assert_rows` helper in `tests/test_analytical_queries.py` ran `assert type(got[key]) is int` for every expected value that was not None and not a float. String expected values (group_label A/B/A_minus_B, metric names) could therefore never pass.
+
+Change: only that assertion. It now runs only when the expected value is an int and not a bool. Exact equality for all values and every other assertion are unchanged. No other test, spec, src, queries, README or dependency was touched.
+
+Result: `python -m pytest -q tests/test_analytical_queries.py tests/test_query_runner.py tests/test_readme_contract.py` gives 71 passed, 0 failed. The full suite was not run.

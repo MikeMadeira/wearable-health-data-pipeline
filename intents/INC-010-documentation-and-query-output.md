@@ -80,8 +80,10 @@ them. No pipeline behavior changes.
   the provisional thresholds (the stuck-run threshold, the weekly and cohort coverage
   thresholds) are marked as assumptions. Timezone and week rules, quality handling and
   incremental corrections are described as implemented behavior.
-- `gold_participant_devices` is recorded as a client requirement that was delivered in
-  INC-002.
+- `gold_participant_devices` is recorded as a client requirement that the pipeline does not
+  produce. The brief lists it only as a secondary "also produce" item, not among its main
+  outputs, and INIT-001 placed it out of scope, so it was not implemented (nothing was
+  delivered in INC-002).
 - Scaling is discussed qualitatively and grounded in measured numbers: the full-run time,
   peak memory and dataset size recorded in the INC-009 evidence. No thresholds or
   extrapolated performance estimates are invented.
