@@ -114,6 +114,8 @@ def validate_phase_paths(
         allowed_prefixes = ("reports/", "notebooks/")
     elif phase == "implementation":
         allowed_prefixes = ("reports/", "src/")
+        if kind == "code":
+            allowed_prefixes += ("queries/",)
     else:
         raise WorkflowError(f"Unknown workflow phase: {phase}")
 
@@ -128,9 +130,13 @@ def validate_phase_paths(
             continue
         if phase == "implementation" and kind == "environment" and path in {
             "Dockerfile",
+            ".dockerignore",
+            "docker-compose.yml",
             "pyproject.toml",
             "uv.lock",
         }:
+            continue
+        if phase == "implementation" and kind == "code" and path == "README.md":
             continue
         if not path.startswith(allowed_prefixes):
             raise WorkflowError(f"Phase modified an unauthorized path: {path}")
@@ -419,7 +425,7 @@ def validate_repair_paths(
     """Constrain a repair agent to artifacts owned by its blocker category."""
     report_prefix = f"reports/{artifact_id}/{phase}-recovery-"
     implementation_paths = {
-        "code": ("src/",),
+        "code": ("src/", "queries/"),
         "environment": ("src/",),
         "notebook": ("notebooks/",),
     }
@@ -432,15 +438,20 @@ def validate_repair_paths(
     if allowed is None:
         responsible_agent(blocker_type)
     for path in paths:
-        environment_file = kind == "environment" and path in {
-            "Dockerfile",
-            "pyproject.toml",
-            "uv.lock",
-        }
+        extra_file = (
+            kind == "environment"
+            and path in {
+                "Dockerfile",
+                ".dockerignore",
+                "docker-compose.yml",
+                "pyproject.toml",
+                "uv.lock",
+            }
+        ) or (kind == "code" and blocker_type == "IMPLEMENTATION" and path == "README.md")
         if (
             not path.startswith(allowed)
             and not path.startswith(report_prefix)
-            and not environment_file
+            and not extra_file
         ):
             raise WorkflowError(
                 f"{blocker_type} repair modified an unauthorized path: {path}"

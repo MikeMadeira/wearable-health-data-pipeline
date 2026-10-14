@@ -310,6 +310,60 @@ def test_notebook_document_rejects_duplicate_cell_ids() -> None:
         validate_notebook_document(notebook, "sample.ipynb")
 
 
+@pytest.mark.parametrize("path", [".dockerignore", "docker-compose.yml"])
+def test_environment_implementation_allows_container_files(path: str) -> None:
+    validate_phase_paths(
+        [path, "reports/INC-009/implementer.md"], "implementation", "INC-009", "environment"
+    )
+    validate_repair_paths(
+        [path], "IMPLEMENTATION", "INC-009", "implementation", "environment"
+    )
+
+
+@pytest.mark.parametrize("path", ["README.md", "queries/chronotype.sql"])
+def test_code_implementation_allows_readme_and_queries(path: str) -> None:
+    validate_phase_paths(
+        [path, "reports/INC-010/implementer.md"], "implementation", "INC-010", "code"
+    )
+    validate_repair_paths(
+        [path], "IMPLEMENTATION", "INC-010", "implementation", "code"
+    )
+
+
+@pytest.mark.parametrize(
+    "path", ["README.md", "queries/q.sql", ".dockerignore", "docker-compose.yml", "Dockerfile"]
+)
+def test_new_paths_stay_rejected_where_not_granted(path: str) -> None:
+    with pytest.raises(WorkflowError):
+        validate_phase_paths([path], "planning", "INC-010", "code")
+    with pytest.raises(WorkflowError):
+        validate_phase_paths([path], "slicing", "INC-010", "code")
+    if path in {"README.md", "queries/q.sql"}:
+        with pytest.raises(WorkflowError):
+            validate_phase_paths([path], "implementation", "INC-009", "environment")
+        with pytest.raises(WorkflowError):
+            validate_phase_paths([path], "implementation", "INC-007", "notebook")
+        with pytest.raises(WorkflowError):
+            validate_repair_paths([path], "IMPLEMENTATION", "INC-009", "implementation", "environment")
+        with pytest.raises(WorkflowError):
+            validate_repair_paths([path], "TESTS", "INC-010", "implementation", "code")
+    else:
+        with pytest.raises(WorkflowError):
+            validate_phase_paths([path], "implementation", "INC-010", "code")
+        with pytest.raises(WorkflowError):
+            validate_repair_paths([path], "IMPLEMENTATION", "INC-010", "implementation", "code")
+
+
+def test_prefix_lookalikes_of_new_paths_are_rejected() -> None:
+    for path in ["README.md.bak", "README.mdx", "queries-old/q.sql", "docker-compose.yml.bak"]:
+        with pytest.raises(WorkflowError):
+            validate_phase_paths([path], "implementation", "INC-010", "code")
+    with pytest.raises(WorkflowError):
+        validate_phase_paths(["docker-compose.yml.bak"], "implementation", "INC-009", "environment")
+    with pytest.raises(WorkflowError):
+        validate_repair_paths(["README.md.bak"], "IMPLEMENTATION", "INC-010", "implementation", "code")
+
+
 def test_repair_paths_follow_increment_kind() -> None:
     validate_repair_paths(
         ["Dockerfile", "reports/INC-000-environment-setup/implementation-recovery-01.md"],

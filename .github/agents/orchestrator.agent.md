@@ -31,10 +31,11 @@ produce the proposal commit. Slicing stops before specs, tests, stubs, or source
 ### Increment kinds
 
 - `code` uses the standard spec, stub, red-test, implementation, and green-test gates.
+  The implementation may also change `README.md` and files under `queries/`.
 - `environment` uses a missing-dependency red smoke test (`test_environment_smoke`),
   then verifies
   local pytest plus Docker build and container tests. The implementation may change
-  the Dockerfile and dependency configuration.
+  the Dockerfile, `.dockerignore`, `docker-compose.yml` and dependency configuration.
 - `notebook` has a reviewed acceptance checklist but no spec/stub/test red baseline.
   Implementation is limited to notebooks and reports; validate and execute changed
   notebooks and confirm raw `data/` files remain unchanged.
