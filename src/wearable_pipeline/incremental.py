@@ -22,6 +22,7 @@ from wearable_pipeline.pipeline import (
 )
 from wearable_pipeline.sleep import build_sleep_layer
 from wearable_pipeline.steps import build_steps_layer
+from wearable_pipeline.weekly import TABLE_NAME as WEEKLY_TABLE, WEEKLY, WEEKLY_COLUMNS
 
 OUTCOME_INCREMENTAL = "incremental"
 OUTCOME_NOOP = "noop"
@@ -77,7 +78,7 @@ class DerivedTable(Protocol):
         """
 
 
-DERIVED_TABLES: list[DerivedTable] = []
+DERIVED_TABLES: list[DerivedTable] = [WEEKLY]
 
 
 def read_event_file(path: Path, relative: str, kind: str) -> list[Any]:
@@ -121,7 +122,7 @@ _BUILDERS = {"sleep": build_sleep_layer, "steps": build_steps_layer,
              "heart_rate": build_heart_rate_layer}
 _GOLD_SLICES = {"sleep": SLEEP_SLICE, "steps": STEPS_SLICE, "heart_rate": HR_SLICE}
 _GOLD_VALUES = {"sleep": _sleep_gold, "steps": _steps_gold, "heart_rate": _hr_gold}
-_EXPECTED_TABLES = (*TABLE_DDL, "gold_clinical_daily")
+_EXPECTED_TABLES = (*TABLE_DDL, "gold_clinical_daily", WEEKLY_TABLE)
 
 
 def _layer_tables(kind: str, layer: Any) -> dict[str, list[tuple[Any, ...]]]:
@@ -138,6 +139,8 @@ def _expected_schema() -> dict[str, list[tuple[str, str]]]:
             con.execute(f"CREATE TABLE {name} ({ddl})")
         con.execute("CREATE TABLE gold_clinical_daily ("
                     + ", ".join(f"{n} {k}" for n, k in ALL_GOLD_COLUMNS) + ")")
+        con.execute(f"CREATE TABLE {WEEKLY_TABLE} ("
+                    + ", ".join(f"{n} {k}" for n, k in WEEKLY_COLUMNS) + ")")
         return {name: [(r[0], r[1]) for r in con.execute(f"DESCRIBE {name}").fetchall()]
                 for name in _EXPECTED_TABLES}
     finally:

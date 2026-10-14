@@ -1068,6 +1068,7 @@ def test_failure_inside_the_transaction_rolls_back_everything(tmp_path, monkeypa
     report_before = (out / "quality" / "report.md").read_bytes()
     quality_files = sorted(p.name for p in (out / "quality").iterdir())
     fake = FakeDerived(fail=True)
+    original_derived = incremental.DERIVED_TABLES  # INC-007 amendment: restore, not []
     monkeypatch.setattr(incremental, "DERIVED_TABLES", [fake])
     m_corrected(data)
     with pytest.raises(InjectedFailure, match="injected failure"):
@@ -1077,7 +1078,7 @@ def test_failure_inside_the_transaction_rolls_back_everything(tmp_path, monkeypa
     assert (out / "quality" / "report.md").read_bytes() == report_before
     assert sorted(p.name for p in (out / "quality").iterdir()) == quality_files
     assert sorted(p.name for p in out.iterdir() if p.is_file()) == ["wearable.duckdb"]
-    monkeypatch.setattr(incremental, "DERIVED_TABLES", [])
+    monkeypatch.setattr(incremental, "DERIVED_TABLES", original_derived)
     inc(data, out)  # the output is usable and the same change now succeeds
     assert_equals_full(data, out, tmp_path)
 
