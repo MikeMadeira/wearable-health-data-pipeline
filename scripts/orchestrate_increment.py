@@ -229,7 +229,7 @@ def run_tests(repo_root: Path, python_executable: str, expected: str) -> str:
     elif expected == "environment-red":
         expected_prerequisite_errors = ("ModuleNotFoundError", "No module named")
         exactly_one_smoke_failure = bool(
-            re.search(r"(?m)^=+\s+1 failed(?:,|\s)", output)
+            re.search(r"(?m)^(?:=+\s+)?1 failed(?:,|\s)", output)
         ) and "test_environment_smoke" in output
         if result.returncode == 0 or not exactly_one_smoke_failure or not any(
             message in output for message in expected_prerequisite_errors
