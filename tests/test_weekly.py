@@ -180,7 +180,8 @@ def test_constants_and_registration():
     assert MIN_VALID_DAYS == 4
     assert isinstance(WEEKLY, WeeklyBiostat)
     assert WEEKLY.name == TABLE_NAME
-    assert [t.name for t in incremental.DERIVED_TABLES] == [TABLE_NAME]
+    # INC-008 amendment: the cohort table is registered after the weekly table
+    assert [t.name for t in incremental.DERIVED_TABLES] == [TABLE_NAME, "gold_chronotype_cohort"]
     assert incremental.DERIVED_TABLES[0] is WEEKLY
 
 
