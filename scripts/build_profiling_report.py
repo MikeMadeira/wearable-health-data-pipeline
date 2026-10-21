@@ -347,6 +347,9 @@ td.hl{background:#fcf3cf;font-weight:600}.null{color:#a93226;font-style:italic}
 @media(max-width:900px){.cols,dl{grid-template-columns:1fr}}
 .arch{background:#fff;border:1px solid #d5d8dc;border-radius:8px;padding:14px;margin:14px 0}
 .dec td{white-space:normal;vertical-align:top}.proposed{background:#fef5e7}
+.dec ul{margin:0;padding-left:16px}.dec li{margin-bottom:4px}.dec td.gap{background:#fdf2e9}
+.quote{border-left:4px solid #1b2631;background:#fff;padding:8px 16px;font-style:italic;color:#34495e}
+pre{background:#1b2631;color:#eaeded;padding:10px 14px;border-radius:6px;overflow-x:auto;font-size:12.5px}
 footer{text-align:center;color:var(--mut);font-size:12px;padding:20px}
 """
 
@@ -392,15 +395,15 @@ def local_architecture():
     }
     spec = {
         "raw": (["Raw exports", "/data (read-only mount)", "participants, survey,", "device, sleep, steps, HR"], "#fdebd0", "#d68910"),
-        "chk": (["Input checks", "run-failing only for", "missing / malformed", "inputs"], "#fadbd8", BAD),
-        "bronze": (["Bronze", "raw_manifest", "path, SHA-256,", "record count"], "#d6eaf8", BLUE),
+        "chk": (["Input checks", "fail fast on missing or", "malformed inputs", "(before any output)"], "#fadbd8", BAD),
+        "bronze": (["Bronze", "raw_manifest", "path, size, SHA-256,", "CSV row count"], "#d6eaf8", BLUE),
         "silver": (["Silver (shared)", "typed participants, survey,", "sleep sessions + stages,", "steps, heart rate"], "#d5f5e3", GOOD),
         "daily": (["gold_clinical_daily", "key: participant_id, local_date"], "#fcf3cf", "#b7950b"),
         "weekly": (["gold_biostat_weekly", "key: participant_id, week_id"], "#fcf3cf", "#b7950b"),
         "cohort": (["gold_chronotype_cohort", "key: participant_id"], "#fcf3cf", "#b7950b"),
         "out": (["/output (writable mount)", "wearable.duckdb", "(one DuckDB file)"], "#e8daef", PURPLE),
         "qual": (["Quality layer", "flags, withheld fields,", "quality_rejects,", "quality_results"], "#fdebd0", "#d68910"),
-        "state": (["Run state", "manifest + run_id,", "full / incremental mode"], "#eaeded", "#566573"),
+        "state": (["Run state", "previous manifest, run_id,", "run_window, file counts"], "#eaeded", "#566573"),
         "qr": (["Query runner", "read-only SQL", "queries/*.sql"], "#e8daef", PURPLE),
         "cmp": (["compare", "diff two", "output dirs"], "#e8daef", PURPLE),
     }
@@ -885,6 +888,15 @@ def build(db_path: Path, data_dir: Path, out_path: Path) -> None:
          "Per-output parsing: daily, weekly and cohort numbers would diverge on the same raw data.", "Silver keeps raw rows, so consumers must use gold or de-duplicate."),
         ("Quality failure behaviour", "Implemented", "Field-level defects are flagged, withheld and counted in quality_results; only unreadable or contract-breaking inputs fail the run.",
          "Failing on any bad record: real exports always contain a few.", "Thresholds (stuck run, coverage) are provisional."),
+        ("Input checks as a fail-fast gate", "Implemented", "Before any transform the run verifies what it cannot work without: the data directory exists, required CSVs and columns are present, files are readable and decodable, event files are JSON arrays of objects, study_days is at least 1. A failure raises an error and stops; no partial output is produced.",
+         "Skipping bad files and continuing: a missing sleep file would look like 'no sleep' and give silently wrong analytics. Failing on any bad value: see the quality behaviour row.",
+         "Structural only: it checks the file contract, not value plausibility (the quality rules do that). A failed incremental run leaves the previous output unchanged (INC-006)."),
+        ("Bronze is a manifest, not a copy of the data", "Implemented", "raw_manifest has one row per raw file: relative path, source classification, size, SHA-256 and, for the three CSVs, the row count. The raw files stay in place under the read-only /data mount. The manifest proves exactly which bytes produced an output, feeds the run_id, and is the change detector for incremental mode.",
+         "Copying ~400 MB of raw JSON into a bronze zone (duplicates data that must stay immutable and out of Git), or having no bronze at all (no provenance, no change detection).",
+         "Row counts exist only for CSV files; JSON event files have none (NULL), so their completeness is judged by the quality counts instead."),
+        ("Run state lives in the output database", "Implemented", "'Run state' is not a separate service: it is what the previous run left in the DuckDB file - raw_manifest (hashes), run_window (study start and length), quality_file_counts and silver_file_owners (per-file results and which participant each file feeds), quality_results - plus the content-derived run_id (a hash of the sorted path + SHA-256 list). Full mode rebuilds everything; incremental mode reads this state read-only, diffs the manifest and re-parses only changed files. A missing, old-schema or manifest-less database falls back to one full rebuild.",
+         "A separate state file or watermark/timestamp store: it can drift from the data, and the files carry no arrival timestamps.",
+         "State and data cannot disagree because they share one file. The run_id identifies the input, not the code version (same data, new code gives the same id), and it detects changed files, not late arrival."),
         ("Reproducibility and idempotency", "Implemented", "Content-derived run_id, a compare command, pinned base image and uv version, locked dependencies, non-root container with read-only data mount.",
          "Unpinned images and timestamp-based run ids: the same input would not give the same output.", "Verified locally; not run on any cloud."),
         ("Incremental mode by file hash", "Implemented", "SHA-256 manifest compared with the stored one; only changed files are re-parsed; gold recomputed for affected participant-days; falls back to a full rebuild when unsure.",
@@ -900,12 +912,161 @@ def build(db_path: Path, data_dir: Path, out_path: Path) -> None:
                "19.4 MB database; no-op incremental about 1.1 s; one-record correction about 3.1 s. No thresholds or growth estimates are claimed. "
                "Memory is the first limit; the shared silver layer and per-participant gold outputs are the natural places to partition.</p>")
 
+    def ul(items):
+        return "<ul>" + "".join(f"<li>{e(i)}</li>" for i in items) + "</ul>"
+
+    prod = [
+        ("Correctness",
+         ["Typed silver layer with an explicit rule catalogue: defects are flagged, withheld or converted per field, never silently dropped; raw values stay next to the normalized ones.",
+          "Gold keyed by a primary key (participant_id, local_date); weekly and cohort tables are derived with the daily rules so overlapping numbers reconcile.",
+          "Every handling choice rests on profiled evidence (see the findings above) and assumptions are labelled as such."],
+         ["1,047 tests collected, written from the increment specs before the code (red tests first).",
+          "Review notebooks per increment recompute key results independently of the pipeline code path (for example sleep efficiency and stuck runs).",
+          "Real data: 0 reconciliation mismatches between the weekly/cohort tables and the daily table."],
+         ["The UTC-5 offset, the meaning of _unit and several thresholds are assumptions awaiting confirmation.",
+          "No daily coverage threshold yet; consumers must read the valid-minute columns."]),
+        ("Reproducibility",
+         ["Python base image and uv pinned to exact tags; dependencies installed with uv sync --frozen from uv.lock.",
+          "Content-derived run_id: a hash of every raw file path and SHA-256, not a timestamp or a random id.",
+          "Outputs, rejects and the report are written in a stable order, and tests require byte-identical reruns.",
+          "Raw data mounted read-only and never written; the image contains no data or outputs and runs as a non-root user.",
+          "A compare command diffs two output directories (tables, column types and report)."],
+         ["The same input gave the same run_id (a826c8397cf5ad8e) in the recorded README run and in a fresh run.",
+          "Tests: deterministic output across independent full runs, rerun on unchanged inputs is identical including the report, pinned tags, locked dependencies, non-root user, read-only data mount."],
+         ["The base image is pinned by tag, not by digest.",
+          "run_id identifies the input, not the code version: the same data with new code gives the same id."]),
+        ("Idempotency: no duplicates, no corruption on re-run",
+         ["Gold is written with MERGE on the primary key, so a re-run updates rows in place and cannot add a second copy.",
+          "Silver, rejects, manifest and quality tables are replaced, not appended; weekly and cohort tables are rebuilt or recomputed per affected key.",
+          "One transaction per run with rollback: a failure leaves the previous output intact. The incremental report is written to a temp file and moved into place.",
+          "Incremental mode is required to equal a full rebuild, and a no-op run writes nothing."],
+         ["Tests: rerun on unchanged inputs is identical (walking skeleton, sleep, steps, heart rate); merge rerun is idempotent and never duplicates (weekly, cohort); a no-op rerun changes no byte of the output; a pipeline error leaves existing tables unchanged; a failure inside the transaction rolls back everything; two incremental runs equal one full rebuild."],
+         ["A full run uses MERGE without pruning: if the study window shrinks, gold rows outside it stay (tested and documented); only the incremental shared-input path prunes.",
+          "It relies on DuckDB's single-writer file lock; there is no run-level lock or queue for concurrent runs."]),
+        ("Scale",
+         ["DuckDB in-process with bulk loading; each event file is parsed once.",
+          "Incremental mode by file hash: work is proportional to what changed, not to the dataset size.",
+          "Files and gold rows are owned per participant, which is the natural partition key. Proposed: one Batch task per participant slice and Iceberg gold partitioned by participant and week."],
+         ["Measured on the real data: 70-71 s full run, 4.9 GiB peak memory, 19.4 MB database; no-op incremental about 1.1 s; one corrected record about 3 s against about 75 s for a full rebuild."],
+         ["A full run holds the transformed tables in memory, so memory is the first limit.",
+          "Only 50 participants x 28 days (about 400 MB raw) were measured: no growth curve, and no container memory limit was set.",
+          "The partitioned cloud layout is a proposal, not built."]),
+        ("Cost",
+         ["No cluster: one short-lived container with DuckDB instead of Spark.",
+          "Incremental mode avoids reprocessing unchanged files: about 3 s instead of about 75 s for a correction, roughly 25x less compute on this dataset.",
+          "Proposed cloud: a pay-per-run AWS Batch task on a schedule, cheap S3 storage, and Athena over Iceberg/Parquet where query cost follows the data scanned (the gold layer is tiny)."],
+         ["Measured local run times above."],
+         ["No cloud cost estimate was produced; the cloud cost points are design reasoning, not measurements."]),
+        ("Testing",
+         ["Spec-driven red tests first: each increment has a contract in specs/ and failing tests before the implementation; synthetic fixtures cover every defect type, grain and key, joins, date and time handling and reruns.",
+          "An equivalence oracle: incremental output must equal a full rebuild (tables, column types and report bytes).",
+          "Container tests check pinned tags, the lock file, the non-root user, the read-only data mount and that raw data is unchanged after a run.",
+          "A README contract test keeps the documented diagrams naming only tables that exist."],
+         ["1,047 tests collected; run them with docker compose run --rm pipeline python -m pytest -q.",
+          "Per-increment review notebooks re-check the results on the real data."],
+         ["No CI workflow exists in the repository: tests run manually and through the orchestrator gates.",
+          "The real-data checks are notebooks, not automated regression tests.",
+          "No test covers concurrent runs or datasets larger than the study."]),
+        ("Operating beyond a one-off run",
+         ["One container command with two documented modes (full, incremental) and exit codes: 0 on success, 1 on a contract or I/O failure with the problem on stderr.",
+          "Every run is traceable: the run_id in the quality tables and report, the manifest of input hashes, per-rule counts in quality_results, and quality_rejects rows that point to file:position.",
+          "Automatic fallback to a full rebuild with a stated reason when state is missing, old-schema or inconsistent.",
+          "A read-only query runner and the compare command for safe inspection and upgrade checks.",
+          "Proposed: EventBridge schedule, Step Functions orchestration, AWS Batch execution, Glue Catalog and Athena access."],
+         ["Operating commands are in the README, and the fallback reasons and CLI exit codes are covered by tests."],
+         ["Not implemented: a scheduler, alerting on quality_results drift, metrics and structured logs, retries, a backfill or restore procedure, CI/CD, and access control for the outputs.",
+          "Proposed next steps: CI that runs the tests and builds the image; an alert when a rule's failed_count jumps against the previous run; automatic retry (safe because of idempotency); a run lock; a schema-drift check on the manifest."]),
+    ]
+    prod_rows = "".join(
+        f'<tr><td><b>{e(r)}</b></td><td>{ul(d)}</td><td>{ul(ev)}</td><td class="gap">{ul(g)}</td></tr>'
+        for r, d, ev, g in prod)
+    prod_tbl = ('<div class="tw"><table class="dec"><thead><tr><th>Requirement</th><th>Architecture decisions that satisfy it</th>'
+                f'<th>Evidence</th><th>Honest gaps</th></tr></thead><tbody>{prod_rows}</tbody></table></div>')
+    prod_demo = ("<pre>docker compose run --rm pipeline          # full run: prints run_id\n"
+                 "cp -r output /tmp/run1\n"
+                 "docker compose run --rm pipeline          # rerun on the same input: same run_id\n"
+                 "docker compose run --rm -v /tmp/run1:/other:ro pipeline python -m wearable_pipeline compare /output /other   # exit 0 = identical</pre>")
+
+    # ---- schemas of every table in the database
+    meta = {
+        "raw_manifest": ("Bronze", "One row per raw file", "relative_path (logical)", "Provenance and change detection: path, source type, size, SHA-256, CSV row count."),
+        "silver_participants": ("Silver", "One row per participant", "participant_id (logical)", "Typed participants with duplicate-key and quality flags."),
+        "silver_wellness_survey": ("Silver", "One row per source survey row", "participant_id, local_date (duplicates flagged, not removed)", "Typed survey scores; orphans such as P999 are kept and flagged."),
+        "silver_sleep_sessions": ("Silver", "One row per source sleep session", "participant_id, local_date (duplicates flagged)", "Session times and the supplied efficiency, kept beside the derived values."),
+        "silver_sleep_stages": ("Silver", "One row per sleep stage", "participant_id, local_date, stage_index", "Stages with the used duration_min and the timestamp-derived duration."),
+        "silver_steps_minute": ("Silver", "One row per raw step record", "none (duplicate minutes are kept and flagged)", "Raw and normalized steps per minute with the activity level and unit."),
+        "silver_heart_rate_minute": ("Silver", "One row per raw heart-rate record", "none (duplicate minutes are kept and flagged)", "Raw and normalized bpm with out-of-range, stuck-sensor and converted-timestamp flags."),
+        "quality_results": ("Quality", "One row per rule", "rule_id (per run)", "Checked and failed counts, handling and severity for every rule."),
+        "quality_rejects": ("Quality", "One row per flagged raw record and rule", "rule_id, row_ref", "Row-level evidence: the raw record as JSON and where it came from."),
+        "quality_file_counts": ("Run state", "One row per file and rule", "relative_path, rule_id", "Per-file quality counts that let incremental mode rebuild quality_results."),
+        "silver_file_owners": ("Run state", "One row per file, silver table and participant", "relative_path, silver_table, participant_id", "Which participants each file feeds, used to scope incremental re-parsing."),
+        "run_window": ("Run state", "A single row", "none", "Study start and length used by the last run."),
+        "gold_clinical_daily": ("Gold", "One row per participant-day", "participant_id, local_date", "Daily clinical analytics: survey, sleep, steps and heart rate with valid counts and flags."),
+        "gold_biostat_weekly": ("Gold", "One row per participant-week", "participant_id, week_id", "Weekly biostatistics with period bounds and coverage columns."),
+        "gold_chronotype_cohort": ("Gold", "One row per enrolled participant", "participant_id", "Whole-window means and valid-day counts used for the chronotype cohort comparison."),
+    }
+    notes = {
+        "participant_id": "Join key to silver_participants",
+        "local_date": "Local calendar date (wake date for sleep, UTC-5 date for minute data)",
+        "minute_ts": "Local minute timestamp after conversion; seconds kept if not aligned",
+        "raw_timestamp": "Original text, kept for converted (Z/offset) records",
+        "heart_rate_bpm": "Raw value as received",
+        "heart_rate_bpm_normalized": "NULL when withheld (out of range, stuck sensor, conflict)",
+        "steps": "Raw value as received",
+        "steps_per_minute": "Normalized per-minute value; NULL when withheld",
+        "unit": "Raw _unit text when present",
+        "quality_flags": "Comma-separated rule ids",
+        "supplied_efficiency_pct": "As supplied; compared with the stage-based value",
+        "derived_duration_min": "end_time minus start_time; kept beside duration_min",
+        "sha256": "SHA-256 of the file bytes",
+        "row_ref": "File path and record position",
+        "raw_values": "The raw record as JSON",
+        "is_orphan": "participant_id not enrolled",
+        "is_out_of_window": "Outside the study window",
+        "is_duplicate_minute": "Another record shares this participant-minute",
+        "is_duplicate_key": "Another row shares this key",
+        "is_stuck_sensor": "Part of a run of 60 or more identical minutes",
+        "is_out_of_range": "Outside 40-200 bpm",
+        "is_timestamp_converted": "Z or offset timestamp converted to UTC-5",
+        "week_id": "1-4, study-relative 7-day blocks",
+        "chronotype_cohort": "A or B; NULL if missing, unexpected or conflicting",
+        "cohort_flag": "Why the cohort is NULL, if it is",
+    }
+    all_cols = Q("select table_name, column_name, data_type, is_nullable from information_schema.columns "
+                 "where table_schema = 'main' order by table_name, ordinal_position")
+    declared_pk = {r[0]: ", ".join(r[1]) for r in Q(
+        "select table_name, constraint_column_names from duckdb_constraints() where constraint_type = 'PRIMARY KEY'")}
+    by_table: dict[str, list] = {}
+    for t_name, c_name, c_type, nullable in all_cols:
+        by_table.setdefault(t_name, []).append((c_name, c_type, nullable))
+    order = [t for t in meta if t in by_table] + sorted(t for t in by_table if t not in meta)
+    ov_rows = []
+    for t_name in order:
+        layer, grain, key, purpose = meta.get(t_name, ("Other", "", "", ""))
+        n = Q(f'select count(*) from "{t_name}"')[0][0]
+        ov_rows.append((layer, t_name, grain, declared_pk.get(t_name, key) + (" [declared PK]" if t_name in declared_pk else ""),
+                        n, len(by_table[t_name]), purpose))
+    schema_overview = table(["Layer", "Table", "Grain", "Key", "Rows", "Columns", "Purpose"], ov_rows,
+                            hl={"Table"}).replace("<table>", '<table class="dec">')
+    schema_detail = []
+    for t_name in order:
+        rows = [(i + 1, c, ty, "yes" if nl == "YES" else "no", notes.get(c, "")) for i, (c, ty, nl) in enumerate(by_table[t_name])]
+        layer = meta.get(t_name, ("Other",))[0]
+        schema_detail.append(f'<details><summary><b>{e(t_name)}</b> - {e(layer)}, {len(rows)} columns</summary>'
+                             + table(["#", "column", "type", "nullable", "note"], rows, hl={"column"}) + "</details>")
+    schema_html = "".join(schema_detail)
+    schema_links = ("<ul><li>Daily key: <code>(participant_id, local_date)</code> joins <code>gold_clinical_daily</code> to the silver tables.</li>"
+                    "<li><code>gold_biostat_weekly</code> and <code>gold_chronotype_cohort</code> join on <code>participant_id</code>.</li>"
+                    "<li><code>silver_file_owners.relative_path</code> and <code>quality_file_counts</code> point to <code>raw_manifest.relative_path</code>.</li>"
+                    "<li><code>quality_rejects.row_ref</code> is <code>file path:record position</code>, so every reject traces to the raw file.</li>"
+                    "<li>Keys marked 'logical' are not declared constraints in DuckDB; only the gold tables declare primary keys where shown.</li></ul>")
+
     kp = [(f"{len(pids)}", "participants"), (f"{n_gold:,}", "gold_clinical_daily rows"), (f"{n_week}", "gold_biostat_weekly rows"),
           (f"{n_coh}", "gold_chronotype_cohort rows"), (f"{n_hr:,}", "silver heart-rate records"), (f"{n_st:,}", "silver step records"),
           (run_id, "run_id")]
     kpis = "".join(f'<div class="kpi"><b>{e(a)}</b><span>{e(b)}</span></div>' for a, b in kp)
     nav = [("overview", "Overview"), ("m05", "Z timestamps"), ("m07", "Duplicates"), ("m01", "_unit"), ("m02", "Ranges"), ("m04", "Stuck sensor"),
-           ("m08", "Gaps"), ("s-sleep", "Sleep"), ("t01", "Orphan"), ("t02", "Firmware"), ("register", "Decision register"), ("arch", "Architecture")]
+           ("m08", "Gaps"), ("s-sleep", "Sleep"), ("t01", "Orphan"), ("t02", "Firmware"), ("register", "Decision register"), ("arch", "Architecture"), ("prod", "Production standards"), ("schemas", "Table schemas")]
     nav_html = "".join(f'<a href="#{a}">{e(b)}</a>' for a, b in nav)
 
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Wearable pipeline - profiling problems, decisions and architecture</title>
@@ -927,6 +1088,15 @@ Handling vocabulary: <b>withhold_field</b> (raw kept, normalized value NULL), <b
 <h3>Local to cloud mapping</h3>{mapping}
 <h3>Architecture decisions explained</h3>{arch_dec_tbl}
 <h3>Scaling</h3>{scaling}
+<h2 id="prod">Production standards: how the architecture meets the requirement</h2>
+<div class="quote">"Engineer it to production standards. Correctness, reproducibility, and idempotency are expected: re-running the pipeline must not duplicate or corrupt data. Consider scale, cost, testing, and how you would operate this beyond a one-off run."</div>
+<p>Each row names the architecture decisions that answer the requirement, the evidence for them, and the gaps that remain. Gaps are stated on purpose: cloud components are proposals, and several operating features do not exist yet.</p>
+{prod_tbl}
+<h3>Demonstrating idempotency</h3>{prod_demo}
+<h2 id="schemas">Table schemas</h2>
+<p>Every table in <code>output/wearable.duckdb</code>, read from the database itself (column order, types and nullability as stored).</p>
+{schema_overview}<h3>How the tables relate</h3>{schema_links}
+<h3>Columns per table</h3>{schema_html}
 </main><footer>Generated from the pipeline output of run {e(run_id)}. Cloud components are a design proposal only.</footer></body></html>"""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(page, encoding="utf-8")
