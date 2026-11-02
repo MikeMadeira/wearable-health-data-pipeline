@@ -76,14 +76,21 @@ class DeviceLayer:
 
 def parse_firmware_label(label: str | None) -> str | None:
     """First ``fw<dotted version>`` token of a device label, or ``None``."""
-    raise NotImplementedError
+    match = FIRMWARE_PATTERN.search(label or "")
+    return match.group(1) if match else None
 
 
 def resolve_firmware(firmware_version: str | None,
                      device_label: str | None) -> tuple[str | None, str]:
     """Final firmware version and its source (``SOURCE_*``): the stripped column value when it
     is not blank, else the version parsed from the label, else ``(None, SOURCE_NONE)``."""
-    raise NotImplementedError
+    stripped = (firmware_version or "").strip()
+    if stripped:
+        return stripped, SOURCE_METADATA
+    parsed = parse_firmware_label(device_label)
+    if parsed is not None:
+        return parsed, SOURCE_LABEL
+    return None, SOURCE_NONE
 
 
 def build_device_layer(
@@ -91,4 +98,53 @@ def build_device_layer(
     metadata: Sequence[Mapping[str, str]],
 ) -> DeviceLayer:
     """Derive silver and gold device rows plus quality outcomes from the two CSV files' rows."""
-    raise NotImplementedError
+    silver: list[tuple[Any, ...]] = []
+    resolved: list[tuple[str | None, str]] = []
+    by_participant: dict[str, list[int]] = {}
+    for index, row in enumerate(metadata):
+        raw = row.get("firmware_version") or ""
+        label = row.get("device_label") or ""
+        value, source = resolve_firmware(raw, label)
+        resolved.append((value, source))
+        flag = {SOURCE_LABEL: RECOVERED, SOURCE_NONE: UNRECOVERABLE}.get(source)
+        silver.append((row["participant_id"], row["device_id"], raw, label,
+                       parse_firmware_label(label), value, source, flag))
+        by_participant.setdefault(row["participant_id"], []).append(index)
+
+    first: dict[str, int] = {}
+    users: dict[str, set[str]] = {}
+    for index, row in enumerate(participants):
+        first.setdefault(row["participant_id"], index)
+        users.setdefault(row["device_id"], set()).add(row["participant_id"])
+
+    gold: list[tuple[Any, ...]] = []
+    rejects: list[tuple[str, str, int, dict[str, str]]] = []
+    failed: Counter[str] = Counter()
+    for pid in sorted(first):
+        p_index = first[pid]
+        device_id = participants[p_index]["device_id"]
+        rows = by_participant.get(pid, [])
+        matching = [i for i in rows if metadata[i]["device_id"] == device_id]
+        chosen = matching[0] if matching else (rows[0] if rows else None)
+        firmware = resolved[chosen][0] if chosen is not None else None
+        source = resolved[chosen][1] if chosen is not None else SOURCE_NONE
+        gold.append((pid, device_id, firmware))
+
+        def reject(rule: str, on_metadata: bool) -> None:
+            failed[rule] += 1
+            if on_metadata and chosen is not None:
+                rejects.append((rule, METADATA_PATH, chosen + 1, dict(metadata[chosen])))
+            else:
+                rejects.append((rule, PARTICIPANTS_PATH, p_index + 1, dict(participants[p_index])))
+
+        if not matching:
+            reject(MISMATCH, True)
+        if len(users[device_id]) > 1:
+            reject(SHARED, False)
+        if DEVICE_ID_PATTERN.fullmatch(device_id) is None:
+            reject(MALFORMED, False)
+        if source == SOURCE_LABEL:
+            reject(RECOVERED, True)
+        if firmware is None:
+            reject(UNRECOVERABLE, True)
+    return DeviceLayer(silver, gold, rejects, failed, len(first))

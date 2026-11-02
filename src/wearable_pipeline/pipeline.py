@@ -14,6 +14,8 @@ from typing import Any
 
 import duckdb
 
+from wearable_pipeline import devices
+from wearable_pipeline.devices import DEVICE_RULES, DeviceLayer, build_device_layer
 from wearable_pipeline.normalize import parse_integer, parse_iso_date
 from wearable_pipeline.heart_rate import HEART_RATE_RULES, HeartRateLayer, build_heart_rate_layer
 from wearable_pipeline.sleep import SLEEP_RULES, SleepLayer, build_sleep_layer
@@ -77,7 +79,7 @@ RULES = {
         "wellness_survey", "exclude_from_output", "medium",
         "date is outside the study window"),
 }
-RULES = {**RULES, **SLEEP_RULES, **STEPS_RULES, **HEART_RATE_RULES}
+RULES = {**RULES, **SLEEP_RULES, **STEPS_RULES, **HEART_RATE_RULES, **DEVICE_RULES}
 INTEGER_FIELDS = ("age", "height_cm", "max_heart_rate")
 
 _FIXED_SOURCES = {
@@ -405,7 +407,9 @@ TABLE_DDL = {
         "failed_count BIGINT"),
     "silver_file_owners": "relative_path VARCHAR, silver_table VARCHAR, participant_id VARCHAR",
     "run_window": "study_start DATE, study_days INTEGER",
+    devices.SILVER_TABLE: ", ".join(f"{n} {k}" for n, k in devices.SILVER_COLUMNS),
 }
+DEVICE_DDL = ", ".join(f"{n} {k}" for n, k in devices.DEVICE_COLUMNS)
 # silver tables written for each event source (specs/INC-006.md section 2)
 SOURCE_TABLES = {
     "sleep": ("silver_sleep_sessions", "silver_sleep_stages"),
@@ -532,6 +536,9 @@ def _persist(db_path: Path, run_id: str, manifest: list[tuple[Any, ...]],
         _bulk_load(con, "quality_rejects", rejects)
         _replace(con, "quality_file_counts", TABLE_DDL["quality_file_counts"], side["counts"])
         _replace(con, "silver_file_owners", TABLE_DDL["silver_file_owners"], side["owners"])
+        _replace(con, devices.SILVER_TABLE, TABLE_DDL[devices.SILVER_TABLE],
+                 t["devices"].silver)
+        _replace(con, devices.TABLE_NAME, DEVICE_DDL, t["devices"].gold)
         _replace(con, "run_window", TABLE_DDL["run_window"], [window])
         _ensure_gold(con)
         _merge_gold(con, t["gold"], prune)
@@ -585,6 +592,7 @@ def _run_full(data_dir: Path, output_dir: Path, study_start: date, study_days: i
     ``prune`` (incremental shared-input path only) deletes gold rows outside the staged set.
     """
     participants, survey = _read_inputs(data_dir, study_days)
+    device_rows = _read_required(data_dir, devices.METADATA_PATH, ("participant_id", "device_id"))
     manifest = _build_manifest(data_dir)
     sleep_files = _read_event_files(data_dir, manifest, "sleep")
     steps_files = _read_event_files(data_dir, manifest, "steps")
@@ -609,6 +617,11 @@ def _run_full(data_dir: Path, output_dir: Path, study_start: date, study_days: i
     t["rejects"] = t["rejects"] + hr.rejects
     t["failed"] = t["failed"] + hr.failed
     t["checked"]["heart_rate"] = hr.checked
+    device_layer: DeviceLayer = build_device_layer(participants, device_rows)
+    t["devices"] = device_layer
+    t["rejects"] = t["rejects"] + device_layer.rejects
+    t["failed"] = t["failed"] + device_layer.failed
+    t["checked"]["device_metadata"] = device_layer.checked
     t["gold"] = [
         (*row, *_sleep_gold(sleep, row[0], row[1]), *_steps_gold(steps, row[0], row[1]),
          *_hr_gold(hr, row[0], row[1]))

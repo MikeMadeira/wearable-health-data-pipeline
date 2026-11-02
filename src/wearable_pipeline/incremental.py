@@ -13,9 +13,11 @@ from typing import Any, Protocol
 
 import duckdb
 
+from wearable_pipeline import devices
 from wearable_pipeline.heart_rate import build_heart_rate_layer
 from wearable_pipeline.pipeline import (
-    ALL_GOLD_COLUMNS, DEFAULT_STUDY_DAYS, DEFAULT_STUDY_START, HR_SLICE, RULES, SLEEP_SLICE,
+    ALL_GOLD_COLUMNS, DEFAULT_STUDY_DAYS, DEFAULT_STUDY_START, DEVICE_DDL, HR_SLICE, RULES,
+    SLEEP_SLICE,
     SOURCE_TABLES, STEPS_SLICE, TABLE_DDL, PipelineError, _build_manifest, _bulk_load,
     _file_stats, _hr_gold, _merge_gold, _read_event_json, _read_inputs, _reject_rows,
     _replace, _report_text, _run_full, _run_id, _sleep_gold, _steps_gold,
@@ -123,7 +125,7 @@ _BUILDERS = {"sleep": build_sleep_layer, "steps": build_steps_layer,
              "heart_rate": build_heart_rate_layer}
 _GOLD_SLICES = {"sleep": SLEEP_SLICE, "steps": STEPS_SLICE, "heart_rate": HR_SLICE}
 _GOLD_VALUES = {"sleep": _sleep_gold, "steps": _steps_gold, "heart_rate": _hr_gold}
-_EXPECTED_TABLES = (*TABLE_DDL, "gold_clinical_daily", WEEKLY_TABLE, COHORT_TABLE)
+_EXPECTED_TABLES = (*TABLE_DDL, devices.TABLE_NAME, "gold_clinical_daily", WEEKLY_TABLE, COHORT_TABLE)
 
 
 def _layer_tables(kind: str, layer: Any) -> dict[str, list[tuple[Any, ...]]]:
@@ -138,6 +140,7 @@ def _expected_schema() -> dict[str, list[tuple[str, str]]]:
     try:
         for name, ddl in TABLE_DDL.items():
             con.execute(f"CREATE TABLE {name} ({ddl})")
+        con.execute(f"CREATE TABLE {devices.TABLE_NAME} ({DEVICE_DDL})")
         con.execute("CREATE TABLE gold_clinical_daily ("
                     + ", ".join(f"{n} {k}" for n, k in ALL_GOLD_COLUMNS) + ")")
         con.execute(f"CREATE TABLE {WEEKLY_TABLE} ("

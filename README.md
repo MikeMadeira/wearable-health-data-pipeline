@@ -152,13 +152,14 @@ flowchart LR
   end
   RAW[raw exports: participants, wellness, sleep, steps, heart rate]
   BRONZE[bronze: raw_manifest]
-  SILVER[silver: typed participants, sleep, steps, heart rate]
+  SILVER[silver: typed participants, device metadata, sleep, steps, heart rate]
   QF[quality flags and exclusions]
   QR[quality report and quality results]
   CHK{"run-failing checks: missing or malformed inputs"}
   GD[gold_clinical_daily]
   GW[gold_biostat_weekly]
   GC[gold_chronotype_cohort]
+  GP[gold_participant_devices: participant devices]
   OD[daily clinical output]
   OW[weekly biostatistics output]
   OC[chronotype cohort output]
@@ -166,6 +167,7 @@ flowchart LR
   STATE[run state: manifest and run_id]
   DATA --> RAW --> CHK --> BRONZE --> SILVER
   SILVER --> QF --> QR
+  SILVER --> GP
   SILVER --> GD --> OD
   GD --> GW --> OW
   GD --> GC --> OC
@@ -175,6 +177,7 @@ flowchart LR
   GD --> OUT
   GW --> OUT
   GC --> OUT
+  GP --> OUT
   QR --> OUT
   BRONZE --> STATE
 ```
@@ -196,8 +199,10 @@ flowchart LR
 
 Legend: "implemented" components exist in the repository and are covered by tests; every
 cloud component is "proposed, not implemented": it has not been built, deployed or
-tested. The implemented gold tables are `gold_clinical_daily`, `gold_biostat_weekly` and
-`gold_chronotype_cohort`; the bronze table is `raw_manifest`.
+tested.
+
+The implemented gold tables are `gold_clinical_daily`, `gold_biostat_weekly`,
+`gold_chronotype_cohort` and `gold_participant_devices`; the bronze table is `raw_manifest`.
 
 | Local component (implemented) | Cloud equivalent |
 |---|---|
@@ -293,15 +298,9 @@ Each line is labelled observed (seen in the data), implemented (behavior in the 
 - The timezone rule (timestamps converted to one fixed UTC-5 local time before the local date is taken): implemented.
 - The week rule (consecutive 7-day periods counted from the study start, with `week_id`): implemented.
 - Quality handling (flag, exclude or count each rule in the quality report): implemented.
+- `gold_participant_devices` (one row per participant from `participants.csv` joined to `device_metadata.csv`): implemented; findings are flagged in the quality report, never excluded.
+- Firmware version (a blank `firmware_version` is recovered from the `fw<version>` token of `device_label`, else left NULL): implemented; the label format is observed in the data.
 - Incremental corrections (a changed raw file triggers a rebuild of the affected rows only): implemented.
-
-### Client requirement not produced
-
-`gold_participant_devices` is a requirement of the client brief that the pipeline does not
-produce: it is not implemented, no code or schema defines it, and nothing in the output
-contains it. The brief lists it only as a secondary "also produce" item, not among its main
-outputs, and the initiative intent placed it out of scope, so it was not built. Device
-identifiers only reach `raw_manifest` and silver participants.
 
 ## Scaling
 
