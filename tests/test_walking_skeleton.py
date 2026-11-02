@@ -215,6 +215,15 @@ HR_HANDLING = {
     "HR_TIMESTAMP_NOT_MINUTE_ALIGNED": ("flag", "medium"),
 }
 
+DEVICE_REASONS = {
+    "DEVICE_ID_MISMATCH": "device_id in participants.csv has no matching row in device_metadata.csv",
+    "DEVICE_SHARED": "device_id in participants.csv is used by more than one participant_id",
+    "DEVICE_ID_MALFORMED": "device_id in participants.csv does not match FBT-NNNN-XXXXXXXX",
+    "FIRMWARE_RECOVERED_FROM_LABEL": "firmware_version is blank and was parsed from device_label",
+    "FIRMWARE_UNRECOVERABLE":
+        "firmware_version is blank and device_label carries no version, so it stays NULL",
+}
+
 RULES = [
     ("PARTICIPANTS_INTEGER_INVALID", "participants"),
     ("PARTICIPANTS_KEY_DUPLICATE", "participants"),
@@ -224,7 +233,8 @@ RULES = [
     ("SURVEY_ORPHAN_PARTICIPANT", "wellness_survey"),
     ("SURVEY_SCORE_INVALID", "wellness_survey"),
 ] + [(rule, "sleep") for rule in SLEEP_REASONS] + [(rule, "steps") for rule in STEPS_REASONS] + [
-    (rule, "heart_rate") for rule in HR_REASONS]
+    (rule, "heart_rate") for rule in HR_REASONS] + [
+    (rule, "device_metadata") for rule in DEVICE_REASONS]
 
 
 # --- output locations, manifest and run id -------------------------------------------
@@ -469,9 +479,12 @@ def test_every_rule_reports_one_row_even_with_zero_failures(tmp_path):
         assert results[(rule, "heart_rate")][:2] == handling
     for key, value in results.items():
         expected_checked = {"participants": 2, "wellness_survey": 5, "sleep": 0, "steps": 1,
-                            "heart_rate": 0}[key[1]]
-        assert value[-3:] == (expected_checked, 0, result.run_id)
-    assert query(result, "SELECT count(*) FROM quality_rejects") == [(0,)]
+                            "heart_rate": 0, "device_metadata": 2}[key[1]]
+        # default fixture: P002 has no device_metadata row, and neither participant has firmware
+        expected_failed = {"DEVICE_ID_MISMATCH": 1, "FIRMWARE_UNRECOVERABLE": 2}.get(key[0], 0)
+        assert value[-3:] == (expected_checked, expected_failed, result.run_id)
+    # the default fixture has no device_metadata row for P002 and no firmware for either
+    assert query(result, "SELECT count(*) FROM quality_rejects") == [(3,)]
 
 
 def test_quality_results_count_defects_and_rejects_carry_raw_values(tmp_path):
@@ -501,6 +514,11 @@ def test_report_lists_run_id_and_one_row_per_rule(tmp_path):
         and not line.startswith("| ---")
     ]
     assert rows == [
+        ["DEVICE_ID_MALFORMED", "device_metadata", "flag", "medium", "2", "0"],
+        ["DEVICE_ID_MISMATCH", "device_metadata", "flag", "high", "2", "1"],
+        ["DEVICE_SHARED", "device_metadata", "flag", "high", "2", "0"],
+        ["FIRMWARE_RECOVERED_FROM_LABEL", "device_metadata", "convert", "low", "2", "0"],
+        ["FIRMWARE_UNRECOVERABLE", "device_metadata", "flag", "medium", "2", "2"],
         ["HR_DUPLICATE_MINUTE_CONFLICT", "heart_rate", "withhold_field", "high", "0", "0"],
         ["HR_DUPLICATE_MINUTE_EXACT", "heart_rate", "flag", "medium", "0", "0"],
         ["HR_ORPHAN_PARTICIPANT", "heart_rate", "exclude_from_output", "medium", "0", "0"],
@@ -686,9 +704,11 @@ def test_pipeline_error_for_non_positive_study_days(tmp_path):
 def test_every_rule_carries_its_exact_reason_text(tmp_path):
     result = run(make_data(tmp_path), tmp_path / "out")
     rows = query(result, "SELECT rule_id, reason FROM quality_results")
-    assert dict(rows) == {**REASONS, **SLEEP_REASONS, **STEPS_REASONS, **HR_REASONS}
-    assert len(rows) == len(REASONS) + len(SLEEP_REASONS) + len(STEPS_REASONS) + len(HR_REASONS)
-    assert len(rows) == 41
+    assert dict(rows) == {**REASONS, **SLEEP_REASONS, **STEPS_REASONS, **HR_REASONS,
+                          **DEVICE_REASONS}
+    assert len(rows) == (len(REASONS) + len(SLEEP_REASONS) + len(STEPS_REASONS)
+                         + len(HR_REASONS) + len(DEVICE_REASONS))
+    assert len(rows) == 46
 
 
 def test_unrecognised_files_are_catalogued_as_unclassified(tmp_path):
@@ -742,6 +762,7 @@ def test_every_reject_carries_its_rules_reason_text(tmp_path):
     bad_age = ["P003", "FBT-0003-CCCCCCCC", "abc", "170", "female", "A", "180"]
     result = run(make_data(tmp_path, participants=[P001, P002, P002, bad_age], survey=survey),
                  tmp_path / "out")
-    rejects = query(result, "SELECT DISTINCT rule_id, reason FROM quality_rejects")
+    rejects = query(result, "SELECT DISTINCT rule_id, reason FROM quality_rejects "
+                            "WHERE source IN ('participants', 'wellness_survey')")
     assert dict(rejects) == REASONS
     assert len(rejects) == len(REASONS)

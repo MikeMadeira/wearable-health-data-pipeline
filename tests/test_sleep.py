@@ -783,7 +783,7 @@ def test_pipeline_reports_sleep_rule_counts_rejects_and_reasons(tmp_path):
     assert by_rule["SLEEP_STAGE_INVALID"][3] == SLEEP_REASONS["SLEEP_STAGE_INVALID"]
     assert json.loads(by_rule["SLEEP_STAGE_INVALID"][4]) == bad
     assert by_rule["SLEEP_ORPHAN_PARTICIPANT"][2] == "wearable_events/P999/sleep.json:1"
-    assert query(result, "SELECT count(*) FROM quality_results") == [(41,)]
+    assert query(result, "SELECT count(*) FROM quality_results") == [(46,)]
 
 
 def test_sleep_rejects_carry_each_rules_exact_reason(tmp_path):
@@ -799,7 +799,8 @@ def test_sleep_rejects_carry_each_rules_exact_reason(tmp_path):
     long = session(stages=[("light", 800), ("awake", 10)], onset=datetime(2026, 1, 7, 8, 0, 3))
     data = data_with(tmp_path, [dup, dup, unparseable, stale, broken, long, session(pid="P999")])
     result = run(data, tmp_path / "out")
-    rows = query(result, "SELECT DISTINCT rule_id, reason FROM quality_rejects")
+    rows = query(result, "SELECT DISTINCT rule_id, reason FROM quality_rejects "
+                         "WHERE source = 'sleep'")
     assert dict(rows) == {
         rule: SLEEP_REASONS[rule] for rule in (
             "SLEEP_ORPHAN_PARTICIPANT", "SLEEP_DUPLICATE_PARTICIPANT_DAY",
@@ -831,7 +832,7 @@ def test_report_lists_all_rules_in_rule_id_order(tmp_path):
         for line in text.splitlines() if line.startswith("| ") and "rule_id" not in line
         and not line.startswith("| ---")
     ]
-    assert len(rows) == 41
+    assert len(rows) == 46
     assert [(r[0], r[1]) for r in rows] == sorted((r[0], r[1]) for r in rows)
     sleep = {r[0]: r for r in rows if r[1] == "sleep"}
     assert sleep["SLEEP_SPAN_OUTLIER"] == [

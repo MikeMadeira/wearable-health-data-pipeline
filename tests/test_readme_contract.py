@@ -1,4 +1,5 @@
-"""INC-010 README contract tests (see specs/INC-010.md section 5).
+"""INC-010 README contract tests (see specs/INC-010.md section 5; INC-011 amendments in
+specs/INC-011.md section 8).
 
 ``README.md`` is rewritten by the implementation phase; these tests only read it. They fail
 with assertions until the README has the specified sections, diagrams, commands and captured
@@ -13,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_analytical_queries import CHRONO_COLUMNS, STUDY_COLUMNS
-from wearable_pipeline import cohort, pipeline, weekly
+from wearable_pipeline import cohort, devices, pipeline, weekly
 
 ROOT = Path(__file__).resolve().parent.parent
 README = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -21,7 +22,8 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 PROPOSED = "proposed, not implemented"
 CLOUD_TERMS = ("S3", "Iceberg", "Glue", "Athena", "EventBridge", "Step Functions", "AWS Batch",
                "ECS", "Parquet")
-GOLD_TABLES = ("gold_clinical_daily", "gold_biostat_weekly", "gold_chronotype_cohort")
+GOLD_TABLES = ("gold_clinical_daily", "gold_biostat_weekly", "gold_chronotype_cohort",
+               "gold_participant_devices")
 QUERY_COMMAND = "python -m wearable_pipeline.query_runner queries --database output/wearable.duckdb"
 # INC-009 verified commands (reports/INC-009/implementer.md; compare form: specs/INC-009.md 4)
 RUN_COMMAND = "docker compose run --rm pipeline"
@@ -100,6 +102,7 @@ def known_tables_and_columns() -> tuple[dict[str, set[str]], set[str]]:
     tables[pipeline_gold()] = {name for name, _ in pipeline.ALL_GOLD_COLUMNS}
     tables[weekly.TABLE_NAME] = {name for name, _ in weekly.WEEKLY_COLUMNS}
     tables[cohort.TABLE_NAME] = {name for name, _ in cohort.COHORT_COLUMNS}
+    tables[devices.TABLE_NAME] = {name for name, _ in devices.DEVICE_COLUMNS}
     return tables, set().union(*tables.values())
 
 
@@ -197,7 +200,8 @@ def test_local_diagram_shows_the_implemented_components_and_flows():
         assert table in local, table
     for text in ("raw", "bronze", "silver", "quality flags", "exclusions", "run-failing checks",
                  "quality report", "full", "incremental", "run state", "read-only", "/data",
-                 "/output", "daily clinical", "weekly biostatistics", "chronotype cohort"):
+                 "/output", "daily clinical", "weekly biostatistics", "chronotype cohort",
+                 "participant devices"):
         assert text in lowered, text
 
 
@@ -265,8 +269,6 @@ def test_every_table_and_column_named_in_the_readme_exists_in_the_code():
             table, column = dotted.groups()
             assert table in tables and column in tables[table], span
             checked += 1
-        elif span == "gold_participant_devices":
-            continue  # a client requirement the code does not define (spec 6, decision D8)
         elif re.fullmatch(r"(?:gold|silver|quality)_\w+|raw_manifest|run_window", span):
             assert span in tables, span
             checked += 1
@@ -283,14 +285,30 @@ def test_mermaid_blocks_name_only_existing_tables():
             assert name in tables, name
 
 
-def test_gold_participant_devices_is_recorded_as_a_requirement_the_code_does_not_produce():
+def test_gold_participant_devices_is_documented_as_produced_with_its_source_and_columns():
     tables, _ = known_tables_and_columns()
-    assert "gold_participant_devices" not in tables
-    mentions = [p for p in re.split(r"\n\s*\n", README) if "gold_participant_devices" in p]
-    assert mentions, "the client requirement must be recorded"
-    for paragraph in mentions:
-        assert re.search(r"(?i)not (produced|implemented|delivered)", paragraph), paragraph
-        assert not re.search(r"(?i)delivered (in|by) INC-002", paragraph), paragraph
+    assert devices.TABLE_NAME == "gold_participant_devices"
+    assert tables["gold_participant_devices"] == {"participant_id", "device_id", "firmware_version"}
+    assert "silver_device_metadata" in tables
+    assert not re.search(r"(?i)client requirement not produced", README)
+    for paragraph in re.split(r"\n\s*\n", README):
+        if "gold_participant_devices" in paragraph:
+            assert not re.search(
+                r"(?i)(does not produce|not (produced|implemented|delivered)|out of scope)",
+                paragraph), paragraph
+    local = next(b for b in mermaid_blocks() if not any(has_term(b, t) for t in CLOUD_TERMS))
+    assert "gold_participant_devices" in local
+    cloud = next(b for b in mermaid_blocks() if any(has_term(b, t) for t in CLOUD_TERMS))
+    assert "gold_participant_devices" not in cloud and "device" not in cloud.lower()
+    architecture = prose(section("Architecture"))
+    assert "`gold_participant_devices`" in architecture
+    lines = [l for l in section("Assumptions").splitlines() if "gold_participant_devices" in l]
+    assert lines, "the Assumptions list must name the table"
+    for line in lines:
+        assert "participants.csv" in line and "device_metadata.csv" in line, line
+        assert "implemented" in line.lower(), line
+    assert any("firmware" in l.lower() and "device_label" in l for l in
+               section("Assumptions").splitlines()), "the firmware parsing rule must be listed"
 
 
 # --------------------------------------------------------------------------- query output
