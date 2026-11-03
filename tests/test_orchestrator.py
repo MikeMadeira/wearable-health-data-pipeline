@@ -6,6 +6,7 @@ import pytest
 from scripts.orchestrate_increment import (
     WorkflowError,
     build_parser,
+    intent_topic,
     parse_blocker_type,
     parse_report_status,
     require_retry_available,
@@ -120,6 +121,17 @@ def test_resolve_artifact_id_uses_intent_slug() -> None:
         )
         == "INC-005-run-city-metrics-pipeline"
     )
+
+
+def test_intent_topic_names_the_increment_from_the_intent_heading(tmp_path: Path) -> None:
+    (tmp_path / "intents").mkdir()
+    (tmp_path / "intents" / "INC-005-x.md").write_text(
+        "# INC-005: Run City Metrics\n\n## Goal\n", encoding="utf-8"
+    )
+    (tmp_path / "intents" / "INC-006-x.md").write_text("no heading\n", encoding="utf-8")
+
+    assert intent_topic(tmp_path, "intents/INC-005-x.md") == " Increment topic: INC-005: Run City Metrics."
+    assert intent_topic(tmp_path, "intents/INC-006-x.md") == ""
 
 
 def test_resolve_artifact_id_rejects_mismatched_intent() -> None:

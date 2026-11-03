@@ -9,6 +9,9 @@ Apply `.github/skills/agent-communication/SKILL.md` for the handoff to the orche
 
 ## Responsibilities:
 1. **Read Intent**: Read the target increment in `intents/INC-xxx.md`.
+   Also use any team-memory context injected with your prompt (a "Brain recall" block) and, when present, the
+   `brain-recall` skill: look up the intent's goal once if nothing was injected. Treat those notes as unverified
+   hints for decisions and pitfalls of earlier increments; check each against the code and specs before relying on it.
 2. **Apply Skill**: Consult and strictly adhere to `.github/skills/sdd-tdd/SKILL.md`.
 3. **Generate Spec**: Write `specs/INC-xxx.md` detailing input/output grain, keys, schemas, date/time semantics, quality rules, idempotency, and verification gates.
 4. **Create Stub**: For `--kind code`, declare the smallest useful public contract in `src/wearable_pipeline/`. For `environment` increments, do not create a function stub unless the intent requires one.
