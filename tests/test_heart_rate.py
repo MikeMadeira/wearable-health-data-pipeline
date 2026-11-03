@@ -675,7 +675,7 @@ def test_pipeline_gold_matches_the_worked_example_and_counts_are_reported(tmp_pa
     for rule in HR_REASONS:
         assert results[(rule, "heart_rate")][-3:-1] == (8, expected.get(rule, 0))
         assert results[(rule, "heart_rate")][:2] == HR_HANDLING[rule]
-    assert query(result, "SELECT count(*) FROM quality_results") == [(46,)]
+    assert query(result, "SELECT count(*) FROM quality_results") == [(48,)]
     rejects = query(result, "SELECT rule_id, row_ref, reason, raw_values FROM quality_rejects "
                             "WHERE source = 'heart_rate' ORDER BY row_ref")
     assert [(r[0], r[1]) for r in rejects] == [

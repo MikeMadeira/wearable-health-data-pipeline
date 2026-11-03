@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -11,15 +12,18 @@ import pytest
 
 from tests.test_incremental import DAY1, HR, hr, inc, m_corrected, state, write_events
 from tests.test_walking_skeleton import (
-    PARTICIPANT_COLUMNS, WINDOW, make_data, query, run, write_csv,
+    PARTICIPANT_COLUMNS, START, WINDOW, make_data, query, run, write_csv,
 )
 from wearable_pipeline import PipelineError, incremental, pipeline
 from wearable_pipeline.compare import compare_outputs
 from wearable_pipeline.devices import (
-    DEVICE_COLUMNS, DEVICE_RULES, METADATA_PATH, MALFORMED, MISMATCH, PARTICIPANTS_PATH,
-    RECOVERED, SHARED, SILVER_COLUMNS, SILVER_TABLE, TABLE_NAME, UNRECOVERABLE,
-    build_device_layer, parse_firmware_label, resolve_firmware,
+    CALIBRATION_INVALID, CALIBRATION_STALE, DEVICE_COLUMNS, DEVICE_RULES, METADATA_PATH,
+    MALFORMED, MISMATCH, PARTICIPANTS_PATH, RECOVERED, SHARED, SILVER_COLUMNS, SILVER_TABLE,
+    TABLE_NAME, UNRECOVERABLE, build_device_layer, parse_firmware_label, resolve_firmware,
 )
+
+CAL = date(2025, 12, 24)  # the calibration date of every mrow(): 15 days before START, not stale
+CAL_RAW = "2025-12-24"
 
 META_COLUMNS = ["participant_id", "device_id", "wear_site", "calibration_date", "firmware_version",
                 "device_label"]
@@ -57,8 +61,10 @@ def ordered(rejects):
 # --------------------------------------------------------------------------- constants
 
 
-def test_rule_constants_are_the_exact_five_device_rules():
-    assert set(DEVICE_RULES) == {MISMATCH, SHARED, MALFORMED, RECOVERED, UNRECOVERABLE}
+def test_rule_constants_are_the_exact_seven_device_rules():
+    # INC-012 added the two calibration rules to the five of INC-011 (tests/test_device_calibration.py)
+    assert set(DEVICE_RULES) == {MISMATCH, SHARED, MALFORMED, RECOVERED, UNRECOVERABLE,
+                                 CALIBRATION_STALE, CALIBRATION_INVALID}
     assert DEVICE_RULES[MISMATCH][:3] == ("device_metadata", "flag", "high")
     assert DEVICE_RULES[SHARED][:3] == ("device_metadata", "flag", "high")
     assert DEVICE_RULES[MALFORMED][:3] == ("device_metadata", "flag", "medium")
@@ -123,12 +129,15 @@ def test_clean_blank_and_unrecoverable_firmware_rows_are_exact():
     participants = [prow("P001", D1), prow("P002", D2), prow("P003", D3)]
     metadata = [mrow("P001", D1, "2.2.0"), mrow("P002", D2, " "),
                 mrow("P003", D3, "", "Fitbit Charge 5")]
-    layer = build_device_layer(participants, metadata)
-    assert layer.gold == [("P001", D1, "2.2.0"), ("P002", D2, "2.1.8"), ("P003", D3, None)]
+    layer = build_device_layer(participants, metadata, START)
+    assert layer.gold == [("P001", D1, "2.2.0", CAL), ("P002", D2, "2.1.8", CAL),
+                          ("P003", D3, None, CAL)]
     assert layer.silver == [
-        ("P001", D1, "2.2.0", label("2.1.8", D1), "2.1.8", "2.2.0", "metadata", None),
-        ("P002", D2, " ", label("2.1.8", D2), "2.1.8", "2.1.8", "device_label", RECOVERED),
-        ("P003", D3, "", "Fitbit Charge 5", None, None, "none", UNRECOVERABLE),
+        ("P001", D1, "2.2.0", label("2.1.8", D1), "2.1.8", "2.2.0", "metadata", None,
+         CAL_RAW, CAL),
+        ("P002", D2, " ", label("2.1.8", D2), "2.1.8", "2.1.8", "device_label", RECOVERED,
+         CAL_RAW, CAL),
+        ("P003", D3, "", "Fitbit Charge 5", None, None, "none", UNRECOVERABLE, CAL_RAW, CAL),
     ]
     assert counts(layer) == no_failures(**{RECOVERED: 1, UNRECOVERABLE: 1})
     assert layer.checked == 3
@@ -145,14 +154,17 @@ def test_mismatch_shared_malformed_and_missing_metadata_are_flagged_not_removed(
     metadata = [mrow("P001", D1), mrow("P002", D2), mrow("P003", D3), mrow("P004", D3),
                 mrow("P005", "FBT-5-BAD"), mrow("P006", "FBT-0006-GGGGGGGG"),
                 mrow("P099", "FBT-0099-ZZZZZZZZ")]
-    layer = build_device_layer(participants, metadata)
+    layer = build_device_layer(participants, metadata, START)
     assert layer.gold == [
-        ("P001", D1, "2.2.0"), ("P002", D2, "2.2.0"), ("P003", D3, "2.2.0"),
-        ("P004", D3, "2.2.0"), ("P005", "FBT-5-BAD", "2.2.0"),
-        ("P006", "FBT-0006-FFFFFFFF", "2.2.0"), ("P007", "FBT-0007-HHHHHHHH", None)]
-    assert counts(layer) == no_failures(**{MISMATCH: 2, SHARED: 2, MALFORMED: 1, UNRECOVERABLE: 1})
+        ("P001", D1, "2.2.0", CAL), ("P002", D2, "2.2.0", CAL), ("P003", D3, "2.2.0", CAL),
+        ("P004", D3, "2.2.0", CAL), ("P005", "FBT-5-BAD", "2.2.0", CAL),
+        ("P006", "FBT-0006-FFFFFFFF", "2.2.0", CAL), ("P007", "FBT-0007-HHHHHHHH", None, None)]
+    # P007 has no metadata row: its calibration date is NULL, i.e. blank, so it is also INVALID
+    assert counts(layer) == no_failures(**{MISMATCH: 2, SHARED: 2, MALFORMED: 1, UNRECOVERABLE: 1,
+                                           CALIBRATION_INVALID: 1})
     assert layer.checked == 7
     assert ordered(layer.rejects) == [
+        (CALIBRATION_INVALID, PARTICIPANTS_PATH, 7, participants[6]),
         (MALFORMED, PARTICIPANTS_PATH, 5, participants[4]),
         (MISMATCH, METADATA_PATH, 6, metadata[5]),
         (MISMATCH, PARTICIPANTS_PATH, 7, participants[6]),
@@ -165,8 +177,8 @@ def test_mismatch_shared_malformed_and_missing_metadata_are_flagged_not_removed(
 
 
 def test_blank_participant_device_id_is_malformed_and_kept_raw():
-    layer = build_device_layer([prow("P001", "")], [mrow("P001", "")])
-    assert layer.gold == [("P001", "", "2.2.0")]
+    layer = build_device_layer([prow("P001", "")], [mrow("P001", "")], START)
+    assert layer.gold == [("P001", "", "2.2.0", CAL)]
     assert counts(layer) == no_failures(**{MALFORMED: 1})
 
 
@@ -176,36 +188,37 @@ def test_malformed_pattern_is_dictionary_shaped():
                     prow("P005", "FBT-0005-aaaaaaaa"), prow("P006", "XFBT-0006-AAAAAAAA"),
                     prow("P007", "FBT-0007-AAAAAAAAA"), prow("P008", " FBT-0008-AAAAAAAA")]
     metadata = [mrow(p["participant_id"], p["device_id"]) for p in participants]
-    layer = build_device_layer(participants, metadata)
+    layer = build_device_layer(participants, metadata, START)
     assert counts(layer) == no_failures(**{MALFORMED: 6})
     assert sorted(r[2] for r in layer.rejects if r[0] == MALFORMED) == [3, 4, 5, 6, 7, 8]
 
 
 def test_duplicate_participant_rows_give_one_gold_row_from_the_first_listing():
     participants = [prow("P001", D1), prow("P001", "FBT-0001-ZZZZZZZZ")]
-    layer = build_device_layer(participants, [mrow("P001", D1)])
-    assert layer.gold == [("P001", D1, "2.2.0")]
+    layer = build_device_layer(participants, [mrow("P001", D1)], START)
+    assert layer.gold == [("P001", D1, "2.2.0", CAL)]
     assert layer.checked == 1
     assert counts(layer) == no_failures()
 
 
 def test_duplicate_metadata_rows_prefer_the_row_with_the_matching_device_id():
     metadata = [mrow("P001", "FBT-0001-ZZZZZZZZ", "1.0.0"), mrow("P001", D1, "2.2.0")]
-    layer = build_device_layer([prow("P001", D1)], metadata)
-    assert layer.gold == [("P001", D1, "2.2.0")]
+    layer = build_device_layer([prow("P001", D1)], metadata, START)
+    assert layer.gold == [("P001", D1, "2.2.0", CAL)]
     assert counts(layer) == no_failures()
     assert len(layer.silver) == 2
 
 
 def test_metadata_without_optional_columns_leaves_firmware_null_and_counts_it():
-    layer = build_device_layer([prow("P001", D1)], [{"participant_id": "P001", "device_id": D1}])
-    assert layer.gold == [("P001", D1, None)]
-    assert layer.silver == [("P001", D1, "", "", None, None, "none", UNRECOVERABLE)]
-    assert counts(layer) == no_failures(**{UNRECOVERABLE: 1})
+    layer = build_device_layer([prow("P001", D1)], [{"participant_id": "P001", "device_id": D1}],
+                               START)
+    assert layer.gold == [("P001", D1, None, None)]
+    assert layer.silver == [("P001", D1, "", "", None, None, "none", UNRECOVERABLE, "", None)]
+    assert counts(layer) == no_failures(**{UNRECOVERABLE: 1, CALIBRATION_INVALID: 1})
 
 
 def test_a_device_metadata_row_for_an_unenrolled_participant_stays_in_silver_only():
-    layer = build_device_layer([prow("P001", D1)], [mrow("P001", D1), mrow("P099", D2)])
+    layer = build_device_layer([prow("P001", D1)], [mrow("P001", D1), mrow("P099", D2)], START)
     assert [r[0] for r in layer.gold] == ["P001"]
     assert [r[0] for r in layer.silver] == ["P001", "P099"]
     assert counts(layer) == no_failures()
@@ -214,16 +227,16 @@ def test_a_device_metadata_row_for_an_unenrolled_participant_stays_in_silver_onl
 def test_gold_is_sorted_and_independent_of_input_order():
     participants = [prow("P003", D3), prow("P001", D1), prow("P002", D2)]
     metadata = [mrow("P003", D3), mrow("P001", D1), mrow("P002", D2, "")]
-    forward = build_device_layer(participants, metadata)
-    backward = build_device_layer(participants[::-1], metadata[::-1])
+    forward = build_device_layer(participants, metadata, START)
+    backward = build_device_layer(participants[::-1], metadata[::-1], START)
     assert [r[0] for r in forward.gold] == ["P001", "P002", "P003"]
     assert backward.gold == forward.gold
     assert counts(backward) == counts(forward)
-    assert build_device_layer(participants, metadata).gold == forward.gold
+    assert build_device_layer(participants, metadata, START).gold == forward.gold
 
 
 def test_empty_inputs_give_an_empty_layer():
-    layer = build_device_layer([], [])
+    layer = build_device_layer([], [], START)
     assert (layer.gold, layer.silver, layer.rejects, layer.checked) == ([], [], [], 0)
     assert counts(layer) == no_failures()
 
@@ -258,7 +271,7 @@ def sql(out: Path, statement: str, *params) -> None:
         con.close()
 
 
-EXPECTED_GOLD = [("P001", D1, "2.2.0"), ("P002", D2, "2.1.8")]
+EXPECTED_GOLD = [("P001", D1, "2.2.0", CAL), ("P002", D2, "2.1.8", CAL)]
 
 
 # --------------------------------------------------------------------------- full run
@@ -278,12 +291,14 @@ def test_silver_device_metadata_keeps_raw_values_and_marks_the_derived_one(tmp_p
     described = query(result, f"DESCRIBE {SILVER_TABLE}")
     assert [(r[0], r[1]) for r in described] == list(SILVER_COLUMNS)
     assert query(result, f"SELECT * FROM {SILVER_TABLE} ORDER BY participant_id") == [
-        ("P001", D1, "2.2.0", label("2.1.8", D1), "2.1.8", "2.2.0", "metadata", None),
-        ("P002", D2, "", label("2.1.8", D2), "2.1.8", "2.1.8", "device_label", RECOVERED),
+        ("P001", D1, "2.2.0", label("2.1.8", D1), "2.1.8", "2.2.0", "metadata", None,
+         CAL_RAW, CAL),
+        ("P002", D2, "", label("2.1.8", D2), "2.1.8", "2.1.8", "device_label", RECOVERED,
+         CAL_RAW, CAL),
     ]
 
 
-def test_quality_results_carry_the_five_device_rules(tmp_path):
+def test_quality_results_carry_the_seven_device_rules(tmp_path):
     result = run(devices_data(tmp_path), tmp_path / "out")
     rows = query(result, "SELECT rule_id, source, handling, severity, reason, checked_count, "
                          "failed_count, run_id FROM quality_results WHERE source = 'device_metadata'")
@@ -297,7 +312,7 @@ def test_flagged_devices_do_not_fail_the_run_and_the_report_lists_them(tmp_path)
     metadata = [mrow("P001", D1, "", "Fitbit Charge 5"), mrow("P002", D2, "2.2.0")]
     result = run(devices_data(tmp_path, participants, metadata), tmp_path / "out")
     assert query(result, f"SELECT * FROM {TABLE_NAME} ORDER BY participant_id") == [
-        ("P001", D1, None), ("P002", D1, "2.2.0")]
+        ("P001", D1, None, CAL), ("P002", D1, "2.2.0", CAL)]
     failed = dict(query(result, "SELECT rule_id, failed_count FROM quality_results "
                                 "WHERE source = 'device_metadata'"))
     assert failed == no_failures(**{SHARED: 2, MISMATCH: 1, UNRECOVERABLE: 1})
@@ -318,7 +333,7 @@ def test_malformed_device_id_is_kept_raw_in_silver_and_gold(tmp_path):
     participants = [list(prow("P001", "FBT-1-bad").values())]
     metadata = [mrow("P001", "FBT-1-bad")]
     result = run(devices_data(tmp_path, participants, metadata), tmp_path / "out")
-    assert query(result, f"SELECT * FROM {TABLE_NAME}") == [("P001", "FBT-1-bad", "2.2.0")]
+    assert query(result, f"SELECT * FROM {TABLE_NAME}") == [("P001", "FBT-1-bad", "2.2.0", CAL)]
     assert query(result, "SELECT device_id FROM silver_participants") == [("FBT-1-bad",)]
     assert query(result, "SELECT failed_count FROM quality_results "
                          f"WHERE rule_id = '{MALFORMED}'") == [(1,)]
@@ -335,7 +350,7 @@ def test_only_participants_that_pass_enrolment_appear(tmp_path):
 def test_duplicate_participant_listing_gives_one_row_and_keeps_its_existing_flag(tmp_path):
     participants = [list(prow("P001", D1).values()), list(prow("P001", D1).values())]
     result = run(devices_data(tmp_path, participants, [mrow("P001", D1)]), tmp_path / "out")
-    assert query(result, f"SELECT * FROM {TABLE_NAME}") == [("P001", D1, "2.2.0")]
+    assert query(result, f"SELECT * FROM {TABLE_NAME}") == [("P001", D1, "2.2.0", CAL)]
     assert query(result, "SELECT failed_count FROM quality_results "
                          "WHERE rule_id = 'PARTICIPANTS_KEY_DUPLICATE'") == [(2,)]
 
@@ -403,7 +418,7 @@ def test_changed_device_metadata_updates_the_table_in_place(tmp_path):
     write_csv(data / "health_summaries" / "device_metadata.csv", META_COLUMNS,
               [list(mrow("P001", D1, "2.3.0").values()), list(mrow("P002", D2, "").values())])
     run(data, out)
-    assert gold_rows(out) == [("P001", D1, "2.3.0"), ("P002", D2, "2.1.8")]
+    assert gold_rows(out) == [("P001", D1, "2.3.0", CAL), ("P002", D2, "2.1.8", CAL)]
 
 
 def test_changed_participant_device_updates_and_removed_participant_disappears(tmp_path):
@@ -415,7 +430,7 @@ def test_changed_participant_device_updates_and_removed_participant_disappears(t
     write_csv(data / "health_summaries" / "device_metadata.csv", META_COLUMNS,
               [list(mrow("P001", D3, "2.2.0").values())])
     run(data, out)
-    assert gold_rows(out) == [("P001", D3, "2.2.0")]
+    assert gold_rows(out) == [("P001", D3, "2.2.0", CAL)]
 
 
 # --------------------------------------------------------------------------- incremental

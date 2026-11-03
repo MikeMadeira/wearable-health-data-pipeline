@@ -222,6 +222,9 @@ DEVICE_REASONS = {
     "FIRMWARE_RECOVERED_FROM_LABEL": "firmware_version is blank and was parsed from device_label",
     "FIRMWARE_UNRECOVERABLE":
         "firmware_version is blank and device_label carries no version, so it stays NULL",
+    "DEVICE_CALIBRATION_STALE": "calibration_date is more than 30 days before study_start",
+    "DEVICE_CALIBRATION_INVALID":
+        "calibration_date is blank or not an ISO 8601 date (YYYY-MM-DD)",
 }
 
 RULES = [
@@ -481,10 +484,12 @@ def test_every_rule_reports_one_row_even_with_zero_failures(tmp_path):
         expected_checked = {"participants": 2, "wellness_survey": 5, "sleep": 0, "steps": 1,
                             "heart_rate": 0, "device_metadata": 2}[key[1]]
         # default fixture: P002 has no device_metadata row, and neither participant has firmware
-        expected_failed = {"DEVICE_ID_MISMATCH": 1, "FIRMWARE_UNRECOVERABLE": 2}.get(key[0], 0)
+        # or a calibration date (the fixture file has no calibration_date column, INC-012)
+        expected_failed = {"DEVICE_ID_MISMATCH": 1, "FIRMWARE_UNRECOVERABLE": 2,
+                           "DEVICE_CALIBRATION_INVALID": 2}.get(key[0], 0)
         assert value[-3:] == (expected_checked, expected_failed, result.run_id)
-    # the default fixture has no device_metadata row for P002 and no firmware for either
-    assert query(result, "SELECT count(*) FROM quality_rejects") == [(3,)]
+    # no row for P002, no firmware and no calibration date for either: 1 + 2 + 2
+    assert query(result, "SELECT count(*) FROM quality_rejects") == [(5,)]
 
 
 def test_quality_results_count_defects_and_rejects_carry_raw_values(tmp_path):
@@ -514,6 +519,8 @@ def test_report_lists_run_id_and_one_row_per_rule(tmp_path):
         and not line.startswith("| ---")
     ]
     assert rows == [
+        ["DEVICE_CALIBRATION_INVALID", "device_metadata", "flag", "medium", "2", "2"],
+        ["DEVICE_CALIBRATION_STALE", "device_metadata", "flag", "medium", "2", "0"],
         ["DEVICE_ID_MALFORMED", "device_metadata", "flag", "medium", "2", "0"],
         ["DEVICE_ID_MISMATCH", "device_metadata", "flag", "high", "2", "1"],
         ["DEVICE_SHARED", "device_metadata", "flag", "high", "2", "0"],
@@ -708,7 +715,7 @@ def test_every_rule_carries_its_exact_reason_text(tmp_path):
                           **DEVICE_REASONS}
     assert len(rows) == (len(REASONS) + len(SLEEP_REASONS) + len(STEPS_REASONS)
                          + len(HR_REASONS) + len(DEVICE_REASONS))
-    assert len(rows) == 46
+    assert len(rows) == 48
 
 
 def test_unrecognised_files_are_catalogued_as_unclassified(tmp_path):

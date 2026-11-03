@@ -1,4 +1,7 @@
-"""Participant-device layer and ``gold_participant_devices`` (contract: specs/INC-011.md)."""
+"""Participant-device layer and ``gold_participant_devices``.
+
+Contracts: specs/INC-011.md (devices, firmware) and specs/INC-012.md (calibration date).
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 TABLE_NAME = "gold_participant_devices"
@@ -42,6 +46,11 @@ SHARED = "DEVICE_SHARED"
 MALFORMED = "DEVICE_ID_MALFORMED"
 RECOVERED = "FIRMWARE_RECOVERED_FROM_LABEL"
 UNRECOVERABLE = "FIRMWARE_UNRECOVERABLE"
+CALIBRATION_STALE = "DEVICE_CALIBRATION_STALE"
+CALIBRATION_INVALID = "DEVICE_CALIBRATION_INVALID"
+
+CALIBRATION_STALE_DAYS = 30  # fixed constant, no CLI flag (INC-012)
+CALIBRATION_DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 # rule_id -> (source, handling, severity, reason); merged into pipeline.RULES by the implementer
 DEVICE_RULES: dict[str, tuple[str, str, str, str]] = {
@@ -60,6 +69,12 @@ DEVICE_RULES: dict[str, tuple[str, str, str, str]] = {
     UNRECOVERABLE: (
         SOURCE, "flag", "medium",
         "firmware_version is blank and device_label carries no version, so it stays NULL"),
+    CALIBRATION_STALE: (
+        SOURCE, "flag", "medium",
+        "calibration_date is more than 30 days before study_start"),
+    CALIBRATION_INVALID: (
+        SOURCE, "flag", "medium",
+        "calibration_date is blank or not an ISO 8601 date (YYYY-MM-DD)"),
 }
 
 
@@ -93,11 +108,36 @@ def resolve_firmware(firmware_version: str | None,
     return None, SOURCE_NONE
 
 
+def parse_calibration_date(raw: str | None) -> date | None:
+    """Calibration date of a raw ``calibration_date`` cell (specs/INC-012.md section 2).
+
+    The stripped text must be a calendar-valid ``YYYY-MM-DD`` date; blank, ``None`` and anything
+    else (other formats, timestamps, impossible dates) give ``None``.
+    """
+    raise NotImplementedError
+
+
+def classify_calibration(raw: str | None, study_start: date) -> str | None:
+    """``CALIBRATION_INVALID`` when ``raw`` does not parse, ``CALIBRATION_STALE`` when the date is
+    strictly more than ``CALIBRATION_STALE_DAYS`` days before ``study_start``, else ``None``."""
+    raise NotImplementedError
+
+
 def build_device_layer(
     participants: Sequence[Mapping[str, str]],
     metadata: Sequence[Mapping[str, str]],
+    study_start: date | None = None,
 ) -> DeviceLayer:
-    """Derive silver and gold device rows plus quality outcomes from the two CSV files' rows."""
+    """Derive silver and gold device rows plus quality outcomes from the two CSV files' rows.
+
+    INC-012 contract (specs/INC-012.md): ``study_start`` is the run's reference date for the
+    calibration rules, passed by ``pipeline._run_full``. Gold and silver gain the calibration
+    columns (``DEVICE_COLUMNS`` and ``SILVER_COLUMNS`` below gain them too).
+    PLANNING STUB STATE: the body is still the INC-011 derivation, ``study_start`` is optional and
+    ignored, and the column constants are still the INC-011 ones, so the existing pipeline keeps
+    running. The implementer makes ``study_start`` required, extends the constants and the body,
+    and wires ``pipeline.py`` (specs/INC-012.md section 6).
+    """
     silver: list[tuple[Any, ...]] = []
     resolved: list[tuple[str | None, str]] = []
     by_participant: dict[str, list[int]] = {}

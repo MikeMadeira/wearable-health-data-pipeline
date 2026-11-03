@@ -288,7 +288,10 @@ def test_mermaid_blocks_name_only_existing_tables():
 def test_gold_participant_devices_is_documented_as_produced_with_its_source_and_columns():
     tables, _ = known_tables_and_columns()
     assert devices.TABLE_NAME == "gold_participant_devices"
-    assert tables["gold_participant_devices"] == {"participant_id", "device_id", "firmware_version"}
+    assert tables["gold_participant_devices"] == {
+        "participant_id", "device_id", "firmware_version", "calibration_date"}  # INC-012: 4th column
+    assert [n for n, _ in devices.DEVICE_COLUMNS] == [
+        "participant_id", "device_id", "firmware_version", "calibration_date"]
     assert "silver_device_metadata" in tables
     assert not re.search(r"(?i)client requirement not produced", README)
     for paragraph in re.split(r"\n\s*\n", README):
@@ -309,6 +312,26 @@ def test_gold_participant_devices_is_documented_as_produced_with_its_source_and_
         assert "implemented" in line.lower(), line
     assert any("firmware" in l.lower() and "device_label" in l for l in
                section("Assumptions").splitlines()), "the firmware parsing rule must be listed"
+
+
+def test_calibration_date_and_rules_are_documented_and_match_the_code():
+    """INC-012: the 3-column statement of INC-011 is replaced by a 4-column one (specs/INC-012.md 8)."""
+    tables, columns = known_tables_and_columns()
+    assert "calibration_date" in tables["gold_participant_devices"]
+    assert {"calibration_date_raw", "calibration_date"} <= tables["silver_device_metadata"]
+    assert devices.CALIBRATION_STALE_DAYS == 30
+    assert devices.CALIBRATION_STALE in pipeline.RULES
+    assert devices.CALIBRATION_INVALID in pipeline.RULES
+    assert len(pipeline.RULES) == 48
+    lines = [l for l in section("Assumptions").splitlines()
+             if "calibration_date" in l and "gold_participant_devices" in l]
+    assert len(lines) == 1, "exactly one Assumptions line must document the calibration date"
+    line = lines[0]
+    assert "implemented" in line.lower(), line
+    for needle in (devices.CALIBRATION_STALE, devices.CALIBRATION_INVALID, "device_metadata.csv",
+                   "study_start", "30 days", "participants.csv"):
+        assert needle in line, (needle, line)
+    assert not re.search(r"(?i)three columns|3 columns|3-column", README)
 
 
 # --------------------------------------------------------------------------- query output
