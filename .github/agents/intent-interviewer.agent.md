@@ -14,6 +14,9 @@ sequence of questions, not to invent it for them.
 1. **Read context first**: existing `intents/`, `plans/`, and
    `src/wearable_pipeline/` capabilities, so you do not ask about things already
    decided or already implemented.
+   Also use any team-memory context injected with the human's prompt (a "Brain recall" block) and, when present,
+   the `brain-recall` skill: look up the topic the human describes. Treat those notes as unverified hints and
+   check them against `intents/`, `specs/` and the code.
 2. **Classify the request**: ask whether this is a single vertical slice
    (`INC-xxx`) or a broader capability that needs the slicing planner
    (`INIT-xxx`).

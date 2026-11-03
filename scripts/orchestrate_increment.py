@@ -367,6 +367,14 @@ def run_docker_tests(repo_root: Path, docker_command: str, work_item: str) -> No
     )
 
 
+def intent_topic(repo_root: Path, intent: str) -> str:
+    """Heading of the intent, so a phase prompt says what the increment is about."""
+    for line in (repo_root / intent).read_text(encoding="utf-8").splitlines():
+        if line.startswith("# "):
+            return f" Increment topic: {line[2:].strip()}."
+    return ""
+
+
 def invoke_agent(
     repo_root: Path,
     copilot_command: str,
@@ -736,6 +744,7 @@ def run_implementation_phase(
                 f"Execute or resume the implementation phase for {work_item} against the generated spec and tests. "
                 f"Read any existing {implementation_report}, write its updated result, and do not modify specs or tests."
             )
+        implementation_prompt += intent_topic(repo_root, args.intent)
         if recovery_report:
             implementation_prompt += (
                 f" Resume using the approved correction in {recovery_report}."
@@ -922,6 +931,7 @@ def run_increment_workflow(args: argparse.Namespace) -> None:
                 f"Execute the planning phase for {args.intent}. Create the spec, red tests, stub, and "
                 f"{planner_report}. Do not implement production logic."
             )
+        planning_prompt += intent_topic(repo_root, args.intent)
         invoke_agent(
             repo_root,
             args.copilot,
