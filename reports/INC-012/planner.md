@@ -31,3 +31,7 @@ Findings:
 
 Next action:
 Route to the planner reviewer (`reports/INC-012/planning-review.md`), then the human planning gate for decisions P1-P10 and the baseline commit.
+
+## Repair note (attempt 1, Blocker-Type: TESTS)
+- `test_rerun_with_a_changed_study_start_replaces_the_findings_in_the_same_directory` now compares `device_state(out) == device_state(fresh)` (device tables, DEVICE_* rejects and DEVICE_* report rows) instead of full `state`, because full runs merge gold rows without pruning (pinned by `test_incremental.py::test_participant_removed_prunes_its_gold_rows_unlike_full_mode_merge`).
+- Spec section 4 idempotency sentence narrowed the same way; non-device gold tables are out of scope per the intent. No other assertion, src/, README, data/ or intents/ changed. Status stays READY.

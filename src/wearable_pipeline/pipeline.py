@@ -617,7 +617,7 @@ def _run_full(data_dir: Path, output_dir: Path, study_start: date, study_days: i
     t["rejects"] = t["rejects"] + hr.rejects
     t["failed"] = t["failed"] + hr.failed
     t["checked"]["heart_rate"] = hr.checked
-    device_layer: DeviceLayer = build_device_layer(participants, device_rows)
+    device_layer: DeviceLayer = build_device_layer(participants, device_rows, study_start)
     t["devices"] = device_layer
     t["rejects"] = t["rejects"] + device_layer.rejects
     t["failed"] = t["failed"] + device_layer.failed

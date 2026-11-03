@@ -29,6 +29,7 @@ DEVICE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("participant_id", "VARCHAR"),
     ("device_id", "VARCHAR"),
     ("firmware_version", "VARCHAR"),
+    ("calibration_date", "DATE"),
 )
 SILVER_COLUMNS: tuple[tuple[str, str], ...] = (
     ("participant_id", "VARCHAR"),
@@ -39,6 +40,8 @@ SILVER_COLUMNS: tuple[tuple[str, str], ...] = (
     ("firmware_version", "VARCHAR"),
     ("firmware_source", "VARCHAR"),
     ("quality_flags", "VARCHAR"),
+    ("calibration_date_raw", "VARCHAR"),
+    ("calibration_date", "DATE"),
 )
 
 MISMATCH = "DEVICE_ID_MISMATCH"
@@ -114,29 +117,35 @@ def parse_calibration_date(raw: str | None) -> date | None:
     The stripped text must be a calendar-valid ``YYYY-MM-DD`` date; blank, ``None`` and anything
     else (other formats, timestamps, impossible dates) give ``None``.
     """
-    raise NotImplementedError
+    text = (raw or "").strip()
+    if CALIBRATION_DATE_PATTERN.fullmatch(text) is None:
+        return None
+    try:
+        return date(int(text[:4]), int(text[5:7]), int(text[8:10]))
+    except ValueError:
+        return None
 
 
 def classify_calibration(raw: str | None, study_start: date) -> str | None:
     """``CALIBRATION_INVALID`` when ``raw`` does not parse, ``CALIBRATION_STALE`` when the date is
     strictly more than ``CALIBRATION_STALE_DAYS`` days before ``study_start``, else ``None``."""
-    raise NotImplementedError
+    parsed = parse_calibration_date(raw)
+    if parsed is None:
+        return CALIBRATION_INVALID
+    if (study_start - parsed).days > CALIBRATION_STALE_DAYS:
+        return CALIBRATION_STALE
+    return None
 
 
 def build_device_layer(
     participants: Sequence[Mapping[str, str]],
     metadata: Sequence[Mapping[str, str]],
-    study_start: date | None = None,
+    study_start: date,
 ) -> DeviceLayer:
     """Derive silver and gold device rows plus quality outcomes from the two CSV files' rows.
 
-    INC-012 contract (specs/INC-012.md): ``study_start`` is the run's reference date for the
-    calibration rules, passed by ``pipeline._run_full``. Gold and silver gain the calibration
-    columns (``DEVICE_COLUMNS`` and ``SILVER_COLUMNS`` below gain them too).
-    PLANNING STUB STATE: the body is still the INC-011 derivation, ``study_start`` is optional and
-    ignored, and the column constants are still the INC-011 ones, so the existing pipeline keeps
-    running. The implementer makes ``study_start`` required, extends the constants and the body,
-    and wires ``pipeline.py`` (specs/INC-012.md section 6).
+    ``study_start`` is the run's reference date for the calibration rules (specs/INC-012.md),
+    passed by ``pipeline._run_full``.
     """
     silver: list[tuple[Any, ...]] = []
     resolved: list[tuple[str | None, str]] = []
@@ -147,8 +156,10 @@ def build_device_layer(
         value, source = resolve_firmware(raw, label)
         resolved.append((value, source))
         flag = {SOURCE_LABEL: RECOVERED, SOURCE_NONE: UNRECOVERABLE}.get(source)
+        cal_raw = row.get("calibration_date") or ""
         silver.append((row["participant_id"], row["device_id"], raw, label,
-                       parse_firmware_label(label), value, source, flag))
+                       parse_firmware_label(label), value, source, flag,
+                       cal_raw, parse_calibration_date(cal_raw)))
         by_participant.setdefault(row["participant_id"], []).append(index)
 
     first: dict[str, int] = {}
@@ -168,7 +179,9 @@ def build_device_layer(
         chosen = matching[0] if matching else (rows[0] if rows else None)
         firmware = resolved[chosen][0] if chosen is not None else None
         source = resolved[chosen][1] if chosen is not None else SOURCE_NONE
-        gold.append((pid, device_id, firmware))
+        calibration = silver[chosen][9] if chosen is not None else None
+        calibration_raw = silver[chosen][8] if chosen is not None else ""
+        gold.append((pid, device_id, firmware, calibration))
 
         def reject(rule: str, on_metadata: bool) -> None:
             failed[rule] += 1
@@ -187,4 +200,7 @@ def build_device_layer(
             reject(RECOVERED, True)
         if firmware is None:
             reject(UNRECOVERABLE, True)
+        finding = classify_calibration(calibration_raw, study_start)
+        if finding is not None:
+            reject(finding, True)
     return DeviceLayer(silver, gold, rejects, failed, len(first))

@@ -338,6 +338,28 @@ def test_a_non_default_study_start_changes_the_findings_not_the_dates(tmp_path):
         == [(date(2025, 12, 24),), (date(2026, 1, 1),), (date(2026, 1, 2),), (date(2026, 2, 1),)]
 
 
+def device_state(out: Path) -> dict:
+    """Device-only state: device tables, DEVICE_* rejects/results and DEVICE_* report rows.
+
+    Non-device gold tables are out of scope: a full run merges gold rows without pruning.
+    """
+    import duckdb
+    con = duckdb.connect(str(out / "wearable.duckdb"), read_only=True)
+    try:
+        tables = {n: con.execute(f"SELECT * FROM {n} ORDER BY ALL").fetchall()
+                  for n in (TABLE_NAME, "silver_device_metadata")}
+        columns = {n: [(r[0], r[1]) for r in con.execute(f"DESCRIBE {n}").fetchall()]
+                   for n in tables}
+        tables["quality_rejects"] = con.execute(
+            "SELECT * FROM quality_rejects WHERE rule_id LIKE 'DEVICE\\_%' ESCAPE '\\' "
+            "ORDER BY ALL").fetchall()
+    finally:
+        con.close()
+    report = (out / "quality" / "report.md").read_text().splitlines()
+    return {"tables": tables, "columns": columns,
+            "report": [ln for ln in report if ln.startswith("| DEVICE_")]}
+
+
 def test_rerun_with_a_changed_study_start_replaces_the_findings_in_the_same_directory(tmp_path):
     data = calibration_data(tmp_path, ["2025-12-24", "2026-01-01", "2026-01-02", "2026-02-01"])
     out = tmp_path / "out"
@@ -348,7 +370,7 @@ def test_rerun_with_a_changed_study_start_replaces_the_findings_in_the_same_dire
                          f"WHERE rule_id = '{CALIBRATION_STALE}'") == [(2,)]
     fresh = tmp_path / "fresh"
     run_pipeline(data, fresh, study_start=LATER_START, study_days=DAYS)
-    assert state(out) == state(fresh)
+    assert device_state(out) == device_state(fresh)
 
 
 def test_identical_rerun_changes_nothing_and_duplicates_no_rows(tmp_path):

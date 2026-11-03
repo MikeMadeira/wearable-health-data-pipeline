@@ -300,6 +300,7 @@ Each line is labelled observed (seen in the data), implemented (behavior in the 
 - Quality handling (flag, exclude or count each rule in the quality report): implemented.
 - `gold_participant_devices` (one row per participant from `participants.csv` joined to `device_metadata.csv`): implemented; findings are flagged in the quality report, never excluded.
 - Firmware version (a blank `firmware_version` is recovered from the `fw<version>` token of `device_label`, else left NULL): implemented; the label format is observed in the data.
+- Calibration date (`gold_participant_devices.calibration_date` is parsed from `calibration_date` in `device_metadata.csv`, joined to `participants.csv`; NULL when blank or not `YYYY-MM-DD`; `DEVICE_CALIBRATION_STALE` flags a date more than 30 days before the run's `study_start`, `DEVICE_CALIBRATION_INVALID` a blank or unparseable one; findings only flag, never exclude): implemented; the 30 days threshold is a fixed constant.
 - Incremental corrections (a changed raw file triggers a rebuild of the affected rows only): implemented.
 
 ## Scaling
